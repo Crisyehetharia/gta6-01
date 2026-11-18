@@ -1,158 +1,276 @@
-// hud.js — HUD (health, cash, wanted stars, speed, objective) and the
-// minimap with player, police, waypoint and car markers.
+// Teluk Cerah — the HUD.
+//
+// Everything the player reads while playing: health and cash, the wanted
+// stars, the current objective, mission banners, speed, the control hints,
+// a live minimap, and the menu / pause / game-over screens. The waypoint
+// arrow points at the mission target even when it is off screen.
 
-import { WORLD_W, WORLD_H } from './city.js';
+function pill(ctx, x, y, w, h) {
+  ctx.fillStyle = 'rgba(18,24,32,0.72)';
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, 12);
+  ctx.fill();
+}
 
-export function drawHUD(ctx, S, vw, vh) {
-  const p = S.player;
+function star(ctx, x, y, r, filled) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.beginPath();
+  for (let i = 0; i < 10; i += 1) {
+    const ang = -Math.PI / 2 + (i * Math.PI) / 5;
+    const rad = i % 2 === 0 ? r : r * 0.45;
+    const px = Math.cos(ang) * rad;
+    const py = Math.sin(ang) * rad;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fillStyle = filled ? '#ffc93a' : 'rgba(255,255,255,0.25)';
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawMinimap(ctx, G) {
+  const mw = 210;
+  const mh = 150;
+  const mx = G.vw - mw - 18;
+  const my = G.vh - mh - 28;
+  ctx.save();
+  pill(ctx, mx - 4, my - 4, mw + 8, mh + 8);
+  ctx.beginPath();
+  ctx.rect(mx, my, mw, mh);
+  ctx.clip();
+  // land, sea strip, roads
+  ctx.fillStyle = '#7fae62';
+  ctx.fillRect(mx, my, mw, mh);
+  ctx.fillStyle = '#3f8fbf';
+  ctx.fillRect(mx, my, (200 / 3600) * mw, mh);
+  ctx.strokeStyle = 'rgba(40,44,54,0.85)';
+  ctx.lineWidth = 3;
+  for (const vx of [600, 1200, 1800, 2400, 3000]) {
+    ctx.beginPath();
+    ctx.moveTo(mx + (vx / 3600) * mw, my);
+    ctx.lineTo(mx + (vx / 3600) * mw, my + mh);
+    ctx.stroke();
+  }
+  for (const hy of [500, 1100, 1700, 2300]) {
+    ctx.beginPath();
+    ctx.moveTo(mx, my + (hy / 2600) * mh);
+    ctx.lineTo(mx + mw, my + (hy / 2600) * mh);
+    ctx.stroke();
+  }
+  const dot = (x, y, r, color) => {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(mx + (x / 3600) * mw, my + (y / 2600) * mh, r, 0, Math.PI * 2);
+    ctx.fill();
+  };
+  // waypoint pulses green
+  if (G.missionTarget) {
+    const pr = 5 + Math.sin(G.time * 5) * 1.5;
+    dot(G.missionTarget.x, G.missionTarget.y, pr, '#37e05a');
+  }
+  for (const car of G.cars) {
+    if (car.kind === 'cop') dot(car.x, car.y, 3, '#ff2e2e');
+    else if (!car.driven) dot(car.x, car.y, 2, 'rgba(240,240,240,0.8)');
+  }
+  const p = G.player;
+  dot(p.x, p.y, 4, '#ffd94a');
+  ctx.restore();
+  ctx.fillStyle = '#f5efdd';
+  ctx.font = 'bold 11px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('TELUK CERAH', mx + mw / 2, my + mh + 14);
   ctx.textAlign = 'left';
-  ctx.textBaseline = 'alphabetic';
+}
 
-  // Top-left: health + cash.
-  ctx.fillStyle = 'rgba(10,14,22,0.55)';
-  roundRect(ctx, 12, 12, 218, 64, 10); ctx.fill();
-  ctx.fillStyle = '#fff';
+function drawBanner(ctx, G) {
+  const b = G.banner;
+  if (!b || b.t <= 0) return;
+  const alpha = Math.min(1, b.t);
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.textAlign = 'center';
+  const tw = Math.max(ctx.measureText(b.title).width, ctx.measureText(b.sub || '').width) + 48;
+  pill(ctx, G.vw / 2 - tw / 2, 210, tw, 64);
+  ctx.fillStyle = '#ffc93a';
+  ctx.font = 'bold 21px system-ui, sans-serif';
+  ctx.fillText(b.title, G.vw / 2, 236);
+  if (b.sub) {
+    ctx.fillStyle = '#f5efdd';
+    ctx.font = '15px system-ui, sans-serif';
+    ctx.fillText(b.sub, G.vw / 2, 260);
+  }
+  ctx.restore();
+  ctx.textAlign = 'left';
+}
+
+function drawToast(ctx, G) {
+  const t = G.toast;
+  if (!t || t.t <= 0) return;
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, t.t);
+  ctx.textAlign = 'center';
+  const tw = Math.max(ctx.measureText(t.title).width, ctx.measureText(t.sub || '').width) + 40;
+  pill(ctx, G.vw / 2 - tw / 2, 292, tw, 54);
+  ctx.fillStyle = '#ff8a7a';
+  ctx.font = 'bold 17px system-ui, sans-serif';
+  ctx.fillText(t.title, G.vw / 2, 314);
+  if (t.sub) {
+    ctx.fillStyle = '#f5efdd';
+    ctx.font = '13px system-ui, sans-serif';
+    ctx.fillText(t.sub, G.vw / 2, 334);
+  }
+  ctx.restore();
+  ctx.textAlign = 'left';
+}
+
+export function drawHUD(ctx, G) {
+  const p = G.player;
+
+  // Top-left: name, health, cash.
+  pill(ctx, 12, 12, 190, 56);
+  ctx.fillStyle = '#f5efdd';
   ctx.font = 'bold 15px system-ui, sans-serif';
-  ctx.fillText('RANI', 24, 34);
-  ctx.fillStyle = '#2b2f38';
-  roundRect(ctx, 24, 42, 150, 12, 6); ctx.fill();
-  ctx.fillStyle = p.hp > 50 ? '#57c465' : p.hp > 25 ? '#f2a007' : '#e0483e';
-  roundRect(ctx, 24, 42, Math.max(0, 150 * (p.hp / 100)), 12, 6); ctx.fill();
-  ctx.fillStyle = '#ffd21f';
+  ctx.fillText('RANI', 24, 33);
+  ctx.fillStyle = '#2a2f38';
+  ctx.beginPath();
+  ctx.roundRect(24, 40, 110, 12, 6);
+  ctx.fill();
+  ctx.fillStyle = p.health > 40 ? '#58c96b' : '#e05252';
+  ctx.beginPath();
+  ctx.roundRect(24, 40, Math.max(0, 110 * (p.health / 100)), 12, 6);
+  ctx.fill();
+  ctx.fillStyle = '#ffc93a';
   ctx.font = 'bold 16px system-ui, sans-serif';
-  ctx.fillText(`$${S.cash}`, 184, 54);
+  ctx.fillText(`$${p.cash}`, 142, 53);
+
+  // Top-centre: current objective.
+  if (G.objective) {
+    ctx.font = 'bold 14px system-ui, sans-serif';
+    const w = ctx.measureText(G.objective).width + 28;
+    pill(ctx, G.vw / 2 - w / 2, 12, w, 32);
+    ctx.fillStyle = '#ffc93a';
+    ctx.textAlign = 'center';
+    ctx.fillText(G.objective, G.vw / 2, 33);
+    ctx.textAlign = 'left';
+  }
 
   // Top-right: wanted stars.
-  ctx.fillStyle = 'rgba(10,14,22,0.55)';
-  roundRect(ctx, vw - 212, 12, 200, 44, 10); ctx.fill();
-  ctx.font = 'bold 22px system-ui, sans-serif';
-  for (let i = 0; i < 5; i++) {
-    ctx.fillStyle = i < S.police.wanted ? '#ffd21f' : 'rgba(255,255,255,0.25)';
-    ctx.fillText('★', vw - 196 + i * 34, 44);
-  }
-  if (S.police.wanted > 0) {
+  pill(ctx, G.vw - 208, 12, 196, 52);
+  for (let i = 0; i < 5; i += 1) star(ctx, G.vw - 188 + i * 34, 34, 12, i < p.wanted);
+  if (p.wanted > 0) {
     ctx.fillStyle = '#ff5a4e';
     ctx.font = 'bold 12px system-ui, sans-serif';
-    ctx.textAlign = 'right';
-    ctx.fillText('POLISI MENGEJARMU', vw - 24, 70);
-    ctx.textAlign = 'left';
-  }
-
-  // Top-centre: mission objective.
-  const obj = S.missions.objectiveText();
-  ctx.font = 'bold 15px system-ui, sans-serif';
-  const ow = ctx.measureText(obj).width + 28;
-  ctx.fillStyle = 'rgba(10,14,22,0.55)';
-  roundRect(ctx, (vw - ow) / 2, 12, ow, 34, 10); ctx.fill();
-  ctx.fillStyle = '#ffd21f';
-  ctx.textAlign = 'center';
-  ctx.fillText(obj, vw / 2, 34);
-  ctx.textAlign = 'left';
-  if (S.missions.timer > 0) {
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold 14px system-ui, sans-serif';
-    ctx.fillText(`⏱ ${Math.ceil(S.missions.timer)} dtk`, (vw - ow) / 2, 62);
-  }
-
-  // Bottom-left: contextual hint + speed while driving.
-  ctx.font = '14px system-ui, sans-serif';
-  ctx.fillStyle = 'rgba(10,14,22,0.55)';
-  const hint = S.hintText();
-  if (hint) {
-    const hw = ctx.measureText(hint).width + 20;
-    roundRect(ctx, 12, vh - 44, hw, 30, 8); ctx.fill();
-    ctx.fillStyle = '#fff';
-    ctx.fillText(hint, 22, vh - 24);
-  }
-  if (p.inCar) {
-    const kmh = Math.round(Math.abs(p.inCar.speed) * 0.32);
-    ctx.fillStyle = 'rgba(10,14,22,0.55)';
-    roundRect(ctx, 12, vh - 84, 120, 30, 8); ctx.fill();
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold 17px system-ui, sans-serif';
-    ctx.fillText(`${kmh} km/jam`, 24, vh - 62);
-  }
-
-  // Banner (mission title / rewards), centre.
-  if (S.banner && S.bannerT > 0) {
-    const a = Math.min(1, S.bannerT);
-    ctx.save();
-    ctx.globalAlpha = a;
-    ctx.fillStyle = 'rgba(10,14,22,0.7)';
-    const bw = Math.max(ctx.measureText(S.banner.title).width, ctx.measureText(S.banner.sub).width) + 48;
-    roundRect(ctx, (vw - bw) / 2, vh * 0.22, bw, 74, 12); ctx.fill();
-    ctx.fillStyle = '#ffd21f';
-    ctx.font = 'bold 22px system-ui, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText(S.banner.title, vw / 2, vh * 0.22 + 32);
-    ctx.fillStyle = '#fff';
-    ctx.font = '15px system-ui, sans-serif';
-    ctx.fillText(S.banner.sub, vw / 2, vh * 0.22 + 58);
-    ctx.restore();
+    ctx.fillText('POLISI MENGEJARMU', G.vw - 110, 56);
     ctx.textAlign = 'left';
   }
 
-  drawMinimap(ctx, S, vw, vh);
-}
+  drawBanner(ctx, G);
+  drawToast(ctx, G);
 
-function roundRect(ctx, x, y, w, h, r) {
-  const rr = Math.min(r, w / 2, h / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + rr, y);
-  ctx.arcTo(x + w, y, x + w, y + h, rr);
-  ctx.arcTo(x + w, y + h, x, y + h, rr);
-  ctx.arcTo(x, y + h, x, y, rr);
-  ctx.arcTo(x, y, x + w, y, rr);
-  ctx.closePath();
-}
+  // Waypoint arrow at the screen edge when the target is off screen.
+  if (G.missionTarget && G.mode === 'play') {
+    const t = G.missionTarget;
+    const sx = t.x - G.cam.x;
+    const sy = t.y - G.cam.y;
+    if (sx < 0 || sx > G.vw || sy < 0 || sy > G.vh) {
+      const cx = G.vw / 2;
+      const cy = G.vh / 2;
+      const ang = Math.atan2(sy - cy, sx - cx);
+      const ax = cx + Math.cos(ang) * (G.vw / 2 - 70);
+      const ay = cy + Math.sin(ang) * (G.vh / 2 - 70);
+      ctx.save();
+      ctx.translate(ax, ay);
+      ctx.rotate(ang);
+      ctx.fillStyle = '#37e05a';
+      ctx.beginPath();
+      ctx.moveTo(18, 0);
+      ctx.lineTo(-12, -13);
+      ctx.lineTo(-12, 13);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+  }
 
-export function drawMinimap(ctx, S, vw, vh) {
-  const MW = 210, MH = 152;
-  const mx = vw - MW - 12, my = vh - MH - 12;
-  const sx = MW / WORLD_W, sy = MH / WORLD_H;
-  ctx.fillStyle = 'rgba(10,14,22,0.65)';
-  roundRect(ctx, mx - 4, my - 4, MW + 8, MH + 8, 10); ctx.fill();
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(mx, my, MW, MH);
-  ctx.clip();
-  // Water + ground.
-  ctx.fillStyle = '#3d9bd6';
-  ctx.fillRect(mx, my + 2280 * sy, MW, MH - 2280 * sy);
-  ctx.fillStyle = '#8fce7d';
-  ctx.fillRect(mx, my, MW, 2280 * sy);
-  // Roads.
-  ctx.strokeStyle = '#3a4150';
-  ctx.lineWidth = 3;
-  for (const rx of S.city.roadsV) {
-    ctx.beginPath(); ctx.moveTo(mx + rx * sx, my); ctx.lineTo(mx + rx * sx, my + 2280 * sy); ctx.stroke();
+  // "Press E" hint near a mission pickup/delivery point.
+  if (G.missionTarget && G.mode === 'play' && G.missionIdx === 0) {
+    const t = G.missionTarget;
+    if (Math.hypot(p.x - t.x, p.y - t.y) < t.r + 10) {
+      ctx.font = 'bold 15px system-ui, sans-serif';
+      const label = G.missionStage === 'pickup' ? 'Tekan E — ambil paket' : 'Tekan E — antar paket';
+      const w = ctx.measureText(label).width + 28;
+      pill(ctx, G.vw / 2 - w / 2, G.vh - 84, w, 34);
+      ctx.fillStyle = '#f5efdd';
+      ctx.textAlign = 'center';
+      ctx.fillText(label, G.vw / 2, G.vh - 62);
+      ctx.textAlign = 'left';
+    }
   }
-  for (const ry of S.city.roadsH) {
-    ctx.beginPath(); ctx.moveTo(mx, my + ry * sy); ctx.lineTo(mx + MW, my + ry * sy); ctx.stroke();
+
+  // Bottom-left: speed and controls.
+  const speedKmh = p.onFoot ? 0 : Math.round(Math.abs(p.car ? p.car.speed : 0) * 0.45);
+  pill(ctx, 12, G.vh - 52, 130, 36);
+  ctx.fillStyle = '#f5efdd';
+  ctx.font = 'bold 16px system-ui, sans-serif';
+  ctx.fillText(p.onFoot ? 'Jalan kaki' : `${speedKmh} km/jam`, 24, G.vh - 29);
+  pill(ctx, 12, G.vh - 96, 330, 34);
+  ctx.fillStyle = '#d8d2c2';
+  ctx.font = '13px system-ui, sans-serif';
+  ctx.fillText('E — keluar/masuk mobil   •   F — pukul   •   P — jeda   •   M — suara', 24, G.vh - 74);
+
+  drawMinimap(ctx, G);
+
+  // --- Screens ------------------------------------------------------------
+  if (G.mode === 'menu') {
+    ctx.fillStyle = 'rgba(10,14,20,0.72)';
+    ctx.fillRect(0, 0, G.vw, G.vh);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffc93a';
+    ctx.font = 'bold 64px system-ui, sans-serif';
+    ctx.fillText('TELUK CERAH', G.vw / 2, 210);
+    ctx.fillStyle = '#f5efdd';
+    ctx.font = '20px system-ui, sans-serif';
+    ctx.fillText('Kota terbuka di tepi teluk — kurir, mobil curian, dan polisi.', G.vw / 2, 252);
+    ctx.font = '16px system-ui, sans-serif';
+    ctx.fillStyle = '#d8d2c2';
+    ctx.fillText('Rani, kurir Teluk Cerah, mengambil pekerjaan dari Dimas sang pengatur.', G.vw / 2, 286);
+    ctx.fillText('WASD / panah — jalan & nyetir      E — masuk/keluar mobil & ambil paket', G.vw / 2, 330);
+    ctx.fillText('F — pukul      P — jeda      M — suara      R — ulang', G.vw / 2, 358);
+    ctx.fillStyle = '#37e05a';
+    ctx.font = 'bold 22px system-ui, sans-serif';
+    ctx.fillText('Tekan Enter untuk main', G.vw / 2, 420);
+    if (G.hasSave) {
+      ctx.fillStyle = '#f5efdd';
+      ctx.font = '17px system-ui, sans-serif';
+      ctx.fillText('Tekan L untuk melanjutkan simpanan terakhir', G.vw / 2, 452);
+    }
+    ctx.textAlign = 'left';
+  } else if (G.mode === 'paused') {
+    ctx.fillStyle = 'rgba(10,14,20,0.6)';
+    ctx.fillRect(0, 0, G.vw, G.vh);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#f5efdd';
+    ctx.font = 'bold 44px system-ui, sans-serif';
+    ctx.fillText('Jeda', G.vw / 2, G.vh / 2 - 10);
+    ctx.font = '18px system-ui, sans-serif';
+    ctx.fillText('Tekan P untuk lanjut', G.vw / 2, G.vh / 2 + 28);
+    ctx.textAlign = 'left';
+  } else if (G.mode === 'over') {
+    ctx.fillStyle = 'rgba(10,14,20,0.78)';
+    ctx.fillRect(0, 0, G.vw, G.vh);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ff5a4e';
+    ctx.font = 'bold 44px system-ui, sans-serif';
+    ctx.fillText(G.overReason || 'Game Over', G.vw / 2, G.vh / 2 - 40);
+    ctx.fillStyle = '#f5efdd';
+    ctx.font = '20px system-ui, sans-serif';
+    ctx.fillText(`Uang yang dikumpulkan: $${p.cash}`, G.vw / 2, G.vh / 2 + 4);
+    ctx.fillStyle = '#37e05a';
+    ctx.font = 'bold 22px system-ui, sans-serif';
+    ctx.fillText('Tekan R untuk main lagi', G.vw / 2, G.vh / 2 + 52);
+    ctx.textAlign = 'left';
   }
-  // Waypoint (pulsing yellow).
-  const wp = S.missions.waypoint();
-  if (wp) {
-    const pulse = 3 + Math.sin(performance.now() / 250) * 1.5;
-    ctx.fillStyle = '#ffd21f';
-    ctx.beginPath(); ctx.arc(mx + wp.x * sx, my + wp.y * sy, pulse + 3, 0, Math.PI * 2); ctx.fill();
-  }
-  // Parked cars (grey), police (red), player (green triangle).
-  ctx.fillStyle = 'rgba(255,255,255,0.7)';
-  for (const c of S.parkedCars) ctx.fillRect(mx + c.x * sx - 1, my + c.y * sy - 1, 2, 2);
-  for (const c of S.police.cops) {
-    ctx.fillStyle = '#ff3b30';
-    ctx.beginPath(); ctx.arc(mx + c.x * sx, my + c.y * sy, 3.5, 0, Math.PI * 2); ctx.fill();
-  }
-  const p = S.player.inCar ?? S.player;
-  ctx.save();
-  ctx.translate(mx + p.x * sx, my + p.y * sy);
-  ctx.rotate(S.player.inCar ? S.player.inCar.angle : S.player.angle);
-  ctx.fillStyle = '#2fe05a';
-  ctx.beginPath(); ctx.moveTo(6, 0); ctx.lineTo(-4, -4); ctx.lineTo(-4, 4); ctx.closePath(); ctx.fill();
-  ctx.restore();
-  ctx.restore();
-  ctx.fillStyle = 'rgba(255,255,255,0.85)';
-  ctx.font = 'bold 11px system-ui, sans-serif';
-  ctx.fillText('TELUK CERAH', mx + 4, my + MH - 6);
 }

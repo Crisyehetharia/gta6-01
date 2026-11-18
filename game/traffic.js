@@ -1,157 +1,195 @@
-// traffic.js — ambient life: traffic cars driving the road grid and
-// pedestrians strolling the sidewalks. Pedestrians react to crime.
+// Teluk Cerah — traffic and pedestrians.
+//
+// Traffic cars cruise the road grid: they keep to a lane, turn at
+// intersections, and brake for the car ahead. Parked cars wait in lots.
+// Pedestrians wander the pavements, flee a speeding car, and get knocked
+// down if one hits them (which the police notice).
 
-import { drawCar, drawPerson, mulberry32, pick } from './assets.js';
-import { Car, randomCarColor } from './vehicles.js';
-import { randomShirt } from './player.js';
+import { drawPerson } from './assets.js';
+import { WORLD, solidAt, atCrossing, nearestRoad } from './city.js';
+import { makeCar, randomCarColor, drawCar, goldColor } from './vehicles.js';
+import { sfx } from './audio.js';
+import { commitCrime } from './player.js';
 
-const NAMES = ['Budi', 'Sari', 'Agus', 'Dewi', 'Rizky', 'Maya', 'Joko', 'Lina', 'Andi', 'Tari'];
+const PED_COLORS = ['#c96f4a', '#4a90c9', '#7d5a9e', '#4a9e7d', '#c9a44a', '#8a5a3a'];
 
-export class Ped {
-  constructor(x, y, rng) {
-    this.x = x; this.y = y;
-    this.angle = rng() * Math.PI * 2;
-    this.speed = 42 + rng() * 26;
-    this.shirt = randomShirt(rng);
-    this.name = pick(rng, NAMES);
-    this.hp = 30;
-    this.down = 0; // seconds lying on the ground after being hit
-    this.flee = 0; // seconds running away
-    this.walkPhase = rng() * 6;
-    this.retarget = 0;
-    this.tx = x; this.ty = y;
+function randPed(rng) {
+  return {
+    x: 0,
+    y: 0,
+    angle: rng() * Math.PI * 2,
+    speed: 42 + rng() * 22,
+    color: PED_COLORS[Math.floor(rng() * PED_COLORS.length)],
+    down: 0,
+    wanderT: 1 + rng() * 3,
+    fleeT: 0,
+  };
+}
+
+export function initTraffic(G) {
+  const rng = G.rng;
+  G.cars = [];
+  G.peds = [];
+  // Moving traffic on the grid.
+  for (let i = 0; i < 13; i += 1) {
+    const axis = rng() < 0.5 ? 'v' : 'h';
+    const road = nearestRoad(axis, axis === 'v' ? 400 + rng() * 3000 : 200 + rng() * 2200);
+    const car = makeCar(0, 0, 0, randomCarColor(rng), 'traffic');
+    car.axis = axis;
+    car.dir = rng() < 0.5 ? 1 : -1;
+    car.lane = rng() < 0.5 ? -17 : 17;
+    car.road = road;
+    car.cruise = 130 + rng() * 60;
+    if (axis === 'v') {
+      car.x = road + car.lane;
+      car.y = 120 + rng() * (WORLD.h - 240);
+      car.angle = car.dir > 0 ? Math.PI / 2 : -Math.PI / 2;
+    } else {
+      car.x = 380 + rng() * (WORLD.w - 760);
+      car.y = road + car.lane;
+      car.angle = car.dir > 0 ? 0 : Math.PI;
+    }
+    car.speed = car.cruise;
+    G.cars.push(car);
   }
-
-  update(dt, S) {
-    if (this.down > 0) {
-      this.down -= dt;
-      return;
-    }
-    this.retarget -= dt;
-    if (this.flee > 0) {
-      this.flee -= dt;
-      const p = S.player;
-      const dx = this.x - p.x, dy = this.y - p.y;
-      const d = Math.hypot(dx, dy) || 1;
-      this.angle = Math.atan2(dy, dx);
-      this.x += (dx / d) * 150 * dt;
-      this.y += (dy / d) * 150 * dt;
-      S.city.resolveCircle(this, 12);
-      this.walkPhase += dt * 16;
-      return;
-    }
-    if (this.retarget <= 0) {
-      const r = S.city.nearestRoad(this.x, this.y);
-      const along = (Math.random() - 0.5) * 700;
-      if (r.horizontal) { this.tx = this.x + along; this.ty = r.y + (Math.random() < 0.5 ? -58 : 58); }
-      else { this.tx = r.x + (Math.random() < 0.5 ? -58 : 58); this.ty = this.y + along; }
-      this.retarget = 2 + Math.random() * 4;
-    }
-    const dx = this.tx - this.x, dy = this.ty - this.y;
-    const d = Math.hypot(dx, dy);
-    if (d > 12) {
-      this.angle = Math.atan2(dy, dx);
-      this.x += (dx / d) * this.speed * dt;
-      this.y += (dy / d) * this.speed * dt;
-      this.walkPhase += dt * 8;
-    }
-    S.city.resolveCircle(this, 12);
+  // Parked cars: a row at the mall lot and a few along the roads.
+  const lotSpots = [
+    [2520, 920, 0], [2590, 920, 0], [2660, 920, 0], [2800, 920, 0], [2870, 920, 0],
+    [2520, 990, 0], [2590, 990, 0], [2800, 990, 0],
+  ];
+  for (const [x, y, a] of lotSpots) {
+    const car = makeCar(x, y, a, randomCarColor(rng), 'parked');
+    G.cars.push(car);
   }
-
-  hit(S, fromCar) {
-    if (this.down > 0) return;
-    this.hp -= 20;
-    this.down = 2.5;
-    if (this.hp <= 0) this.down = 6;
-    S.police.addWanted(1, 'Pedestrian tertabrak!');
-    if (!fromCar) S.audio.punch();
+  for (let i = 0; i < 4; i += 1) {
+    const vx = WORLD.roadsV[Math.floor(rng() * WORLD.roadsV.length)];
+    const hy = WORLD.roadsH[Math.floor(rng() * WORLD.roadsH.length)];
+    const car = makeCar(vx + 78, hy + 200 + rng() * 300, Math.PI / 2, randomCarColor(rng), 'parked');
+    if (!solidAt(G.city, car.x, car.y, 22)) G.cars.push(car);
   }
-
-  draw(ctx) {
-    drawPerson(ctx, this.x, this.y, this.angle, this.shirt, {
-      walkPhase: this.walkPhase,
-      down: this.down > 0,
-    });
+  // The gold mission car, parked in the mall lot.
+  const gold = makeCar(2730, 880, Math.PI / 2, goldColor(), 'gold');
+  G.cars.push(gold);
+  G.goldCar = gold;
+  // Pedestrians near roads and plazas.
+  for (let i = 0; i < 22; i += 1) {
+    const ped = randPed(rng);
+    const vx = WORLD.roadsV[Math.floor(rng() * WORLD.roadsV.length)];
+    const hy = WORLD.roadsH[Math.floor(rng() * WORLD.roadsH.length)];
+    ped.x = vx + (rng() < 0.5 ? -1 : 1) * (70 + rng() * 60);
+    ped.y = hy + (rng() < 0.5 ? -1 : 1) * (70 + rng() * 260);
+    if (solidAt(G.city, ped.x, ped.y, 12)) {
+      ped.x = 900 + rng() * 400;
+      ped.y = 800 + rng() * 200;
+    }
+    G.peds.push(ped);
   }
 }
 
-export class Traffic {
-  constructor(city) {
-    this.city = city;
-    this.cars = [];
-    this.peds = [];
-    const rng = mulberry32(4242);
-    for (let i = 0; i < 14; i++) this.cars.push(this._spawnCar(rng));
-    for (let i = 0; i < 22; i++) {
-      const p = city.roadPoint(rng);
-      const off = (rng() < 0.5 ? -1 : 1) * 58;
-      this.peds.push(new Ped(
-        p.horizontal ? p.x : p.x + off,
-        p.horizontal ? p.y + off : p.y,
-        rng,
-      ));
+function carAhead(G, car, dist) {
+  const fx = Math.cos(car.angle);
+  const fy = Math.sin(car.angle);
+  for (const other of G.cars) {
+    if (other === car || other.kind === 'cop') continue;
+    const dx = other.x - car.x;
+    const dy = other.y - car.y;
+    const along = dx * fx + dy * fy;
+    if (along > 0 && along < dist && Math.abs(dx * fy - dy * fx) < 34) return true;
+  }
+  return false;
+}
+
+export function updateTraffic(G, dt) {
+  const rng = G.rng;
+  for (const car of G.cars) {
+    if (car.kind !== 'traffic' || car.driven) continue;
+    car.turnCd = Math.max(0, (car.turnCd || 0) - dt);
+    // Turn at an intersection sometimes.
+    if (car.turnCd <= 0 && atCrossing(car.x, car.y) && rng() < dt * 0.5) {
+      const newAxis = car.axis === 'v' ? 'h' : 'v';
+      car.axis = newAxis;
+      car.road = nearestRoad(newAxis, newAxis === 'v' ? car.x : car.y);
+      car.lane = rng() < 0.5 ? -17 : 17;
+      car.dir = rng() < 0.5 ? 1 : -1;
+      car.turnCd = 2.5;
+    }
+    // Turn around at the ends of the road.
+    if (car.axis === 'v' && (car.y < 70 || car.y > WORLD.h - 70)) car.dir *= -1;
+    if (car.axis === 'h' && (car.x < 380 || car.x > WORLD.w - 70)) car.dir *= -1;
+    const want = carAhead(G, car, 85) ? 0 : car.cruise;
+    car.speed += (want - car.speed) * Math.min(1, dt * 1.6);
+    const step = car.dir * car.speed * dt;
+    if (car.axis === 'v') {
+      car.y += step;
+      car.x = car.road + car.lane;
+      car.angle = car.dir > 0 ? Math.PI / 2 : -Math.PI / 2;
+    } else {
+      car.x += step;
+      car.y = car.road + car.lane;
+      car.angle = car.dir > 0 ? 0 : Math.PI;
     }
   }
 
-  _spawnCar(rng) {
-    const p = this.city.roadPoint(rng);
-    const car = new Car(p.x, p.y, p.horizontal ? (rng() < 0.5 ? 0 : Math.PI) : (rng() < 0.5 ? Math.PI / 2 : -Math.PI / 2), randomCarColor(rng), { npc: true });
-    car.cruise = 110 + rng() * 60;
-    car.speed = car.cruise;
-    car.horizontal = p.horizontal;
-    return car;
+  const p = G.player;
+  for (const ped of G.peds) {
+    if (ped.down > 0) {
+      ped.down -= dt;
+      continue;
+    }
+    ped.wanderT -= dt;
+    ped.fleeT = Math.max(0, ped.fleeT - dt);
+    // Flee a fast car nearby.
+    if (!p.onFoot && p.car && Math.abs(p.car.speed) > 150) {
+      const d = Math.hypot(ped.x - p.car.x, ped.y - p.car.y);
+      if (d < 140) {
+        ped.fleeT = 1;
+        ped.angle = Math.atan2(ped.y - p.car.y, ped.x - p.car.x);
+      }
+    }
+    if (ped.fleeT > 0) {
+      const nx = ped.x + Math.cos(ped.angle) * 135 * dt;
+      const ny = ped.y + Math.sin(ped.angle) * 135 * dt;
+      if (!solidAt(G.city, nx, ped.y, 12)) ped.x = nx;
+      if (!solidAt(G.city, ped.x, ny, 12)) ped.y = ny;
+      continue;
+    }
+    if (ped.wanderT <= 0) {
+      ped.wanderT = 2 + rng() * 3;
+      ped.angle = rng() * Math.PI * 2;
+    }
+    const nx = ped.x + Math.cos(ped.angle) * ped.speed * dt;
+    const ny = ped.y + Math.sin(ped.angle) * ped.speed * dt;
+    if (!solidAt(G.city, nx, ped.y, 12)) ped.x = nx;
+    else ped.angle += Math.PI / 2;
+    if (!solidAt(G.city, ped.x, ny, 12)) ped.y = ny;
+    else ped.angle += Math.PI / 2;
   }
 
-  update(dt, S) {
-    // Traffic cars cruise along roads and turn at intersections.
-    for (const c of this.cars) {
-      const step = c.speed * dt;
-      c.x += Math.cos(c.angle) * step;
-      c.y += Math.sin(c.angle) * step;
-      const r = this.city.nearestRoad(c.x, c.y);
-      const onRoad = Math.abs(c.x - r.x) < 4 || Math.abs(c.y - r.y) < 4;
-      // Snap back onto the lane centre if drifting.
-      if (c.horizontal && Math.abs(c.y - r.y) > 40) c.y += Math.sign(r.y - c.y) * step * 0.5;
-      if (!c.horizontal && Math.abs(c.x - r.x) > 40) c.x += Math.sign(r.x - c.x) * step * 0.5;
-      // At an intersection, sometimes turn.
-      if (onRoad && Math.random() < dt * 0.12) {
-        if (c.horizontal && Math.random() < 0.5) {
-          c.horizontal = false;
-          c.angle = Math.random() < 0.5 ? Math.PI / 2 : -Math.PI / 2;
-          c.x = r.x;
-        } else if (!c.horizontal && Math.random() < 0.5) {
-          c.horizontal = true;
-          c.angle = Math.random() < 0.5 ? 0 : Math.PI;
-          c.y = r.y;
+  // A fast car that runs a pedestrian down.
+  for (const ped of G.peds) {
+    if (ped.down > 0) continue;
+    for (const car of G.cars) {
+      if (Math.abs(car.speed) < 120) continue;
+      if (Math.hypot(ped.x - car.x, ped.y - car.y) < 26) {
+        ped.down = 4;
+        ped.angle = Math.atan2(ped.y - car.y, ped.x - car.x);
+        if (car.driven) {
+          commitCrime(G, 1);
+          G.stats.knocked += 1;
+          sfx(G.audio, 'crash');
         }
-      }
-      // Wrap around the world edges.
-      if (c.x < -60) c.x = 3660; if (c.x > 3660) c.x = -60;
-      if (c.y < -60) c.y = 2280; if (c.y > 2280) c.y = -60;
-      // Slow down if the player car is right ahead.
-      const p = S.player.inCar;
-      if (p) {
-        const d = Math.hypot(p.x - c.x, p.y - c.y);
-        if (d < 70) c.speed = Math.max(30, c.cruise * 0.3);
-        else c.speed = c.cruise;
-      }
-    }
-    for (const ped of this.peds) ped.update(dt, S);
-    // Player car hitting pedestrians.
-    const car = S.player.inCar;
-    if (car && Math.abs(car.speed) > 60) {
-      for (const ped of this.peds) {
-        if (ped.down <= 0 && Math.hypot(ped.x - car.x, ped.y - car.y) < 30) {
-          ped.hit(S, true);
-          car.speed *= 0.6;
-          S.audio.crash();
-        }
+        break;
       }
     }
   }
+}
 
-  draw(ctx) {
-    for (const c of this.cars) drawCar(ctx, c.x, c.y, c.angle, c.color, {});
-    for (const p of this.peds) p.draw(ctx);
+export function drawTraffic(ctx, G) {
+  for (const car of G.cars) {
+    if (car.kind === 'cop') continue;
+    drawCar(ctx, car, G.time);
+  }
+  for (const ped of G.peds) {
+    drawPerson(ctx, ped.x, ped.y, ped.angle, ped.color, ped.down > 0);
   }
 }

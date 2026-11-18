@@ -1,231 +1,313 @@
-// city.js — Teluk Cerah: a bright coastal city on a grid of roads.
-// World: 3600 x 2600. Roads every 450px. A bay (water) along the south edge
-// with a beach and a wooden pier. Named places used by the missions.
+// Teluk Cerah — the city itself.
+//
+// A coastal grid city, 3600 x 2600: the sea along the west edge, a beach,
+// then a road grid with named places. The layout is built once from a fixed
+// seed so the city is identical on every load; traffic and pedestrians use
+// the run's own seed instead.
+//
+// Exports: WORLD (sizes and road lists), PLACES (named spots the missions
+// use), the building list, collision helpers, and drawCity.
 
-import { PALETTE, drawBuilding, drawTree, drawPalm, mulberry32, pick } from './assets.js';
+import { PALETTE, drawBuilding, drawTree } from './assets.js';
 
-export const WORLD_W = 3600;
-export const WORLD_H = 2600;
-export const ROAD_W = 92;
-export const SPACING = 450;
+// Deterministic little PRNG so the city never changes between loads.
+export function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function next() {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
-export const PLACES = {
-  market: { name: 'Pasar Pagi', x: 675, y: 675 },
-  pier: { name: 'Dermaga Teluk', x: 1800, y: 2430 },
-  garage: { name: 'Bengkel Roda', x: 2925, y: 1125 },
-  hideout: { name: 'Rumah Aman', x: 1125, y: 2025 },
-  parking: { name: 'Parkir Mall', x: 2475, y: 675 },
-  plaza: { name: 'Alun-Alun', x: 1800, y: 1575 },
+export const WORLD = {
+  w: 3600,
+  h: 2600,
+  seaEdge: 200, // water is x < 200
+  sandEdge: 330, // sand runs 200..330
+  roadW: 110,
+  roadsV: [600, 1200, 1800, 2400, 3000],
+  roadsH: [500, 1100, 1700, 2300],
 };
 
-export class City {
-  constructor(seed = 20261124) {
-    this.rng = mulberry32(seed);
-    this.roadsV = [];
-    this.roadsH = [];
-    for (let x = 225; x < WORLD_W; x += SPACING) this.roadsV.push(x);
-    for (let y = 225; y < WORLD_H - 350; y += SPACING) this.roadsH.push(y);
-    // Bay occupies the bottom strip; beach above it; pier juts into the water.
-    this.water = { x: 0, y: 2280, w: WORLD_W, h: 320 };
-    this.beach = { x: 0, y: 2210, w: WORLD_W, h: 70 };
-    this.pier = { x: 1760, y: 2210, w: 80, h: 220 };
-    this.buildings = [];
-    this.trees = [];
-    this.solids = []; // {x,y,w,h} collision rects: buildings + water (pier is walkable)
-    this._genBlocks();
-    this.solids.push({ x: this.water.x, y: this.water.y, w: this.water.w, h: this.water.h });
-  }
+// Named places. Missions and the HUD point at these.
+export const PLACES = {
+  pasar: { name: 'Pasar Pagi', x: 900, y: 800, r: 90 },
+  dermaga: { name: 'Dermaga Teluk', x: 170, y: 1900, r: 80 },
+  mall: { name: 'Parkir Mall', x: 2700, y: 800, r: 110 },
+  bengkel: { name: 'Bengkel Roda', x: 2700, y: 2000, r: 100 },
+  rumah: { name: 'Rumah Aman', x: 900, y: 2000, r: 90 },
+  taman: { name: 'Taman Kota', x: 1500, y: 1400, r: 120 },
+  hotel: { name: 'Hotel Surya', x: 2100, y: 800, r: 90 },
+  stasiun: { name: 'Stasiun', x: 1500, y: 2000, r: 100 },
+};
 
-  _genBlocks() {
-    const rng = this.rng;
-    for (let ix = 0; ix < this.roadsV.length - 1; ix++) {
-      for (let iy = 0; iy < this.roadsH.length - 1; iy++) {
-        const bx = this.roadsV[ix] + ROAD_W / 2 + 14;
-        const by = this.roadsH[iy] + ROAD_W / 2 + 14;
-        const bw = SPACING - ROAD_W - 28;
-        const bh = SPACING - ROAD_W - 28;
-        if (by + bh > this.beach.y - 10) continue; // keep the beach clear
-        // Plaza block in the middle stays open with trees.
-        if (ix === 3 && iy === 3) {
-          for (let t = 0; t < 8; t++) {
-            this.trees.push({ x: bx + 30 + rng() * (bw - 60), y: by + 30 + rng() * (bh - 60), s: 0.9 + rng() * 0.5 });
-          }
-          continue;
-        }
-        // 1-3 buildings per block.
-        const n = 1 + Math.floor(rng() * 3);
-        for (let k = 0; k < n; k++) {
-          const w = 90 + rng() * 120;
-          const h = 80 + rng() * 110;
-          const x = bx + rng() * Math.max(1, bw - w);
-          const y = by + rng() * Math.max(1, bh - h);
-          const b = {
-            x, y, w, h,
-            color: pick(rng, PALETTE.buildingColors),
-            roof: pick(rng, PALETTE.roofColors),
-            seed: Math.floor(rng() * 100),
-          };
-          // Keep mission spots clear of buildings.
-          let clash = false;
-          for (const p of Object.values(PLACES)) {
-            if (p.x > x - 90 && p.x < x + w + 90 && p.y > y - 90 && p.y < y + h + 90) clash = true;
-          }
-          if (clash) continue;
-          this.buildings.push(b);
-          this.solids.push({ x: b.x, y: b.y, w: b.w, h: b.h });
-        }
-        if (rng() < 0.6) {
-          this.trees.push({ x: bx + 20 + rng() * (bw - 40), y: by + 20 + rng() * (bh - 40), s: 0.8 + rng() * 0.6 });
-        }
+// The pier deck is walkable even though it sits over the water.
+const PIER = { x: 40, y: 1855, w: 300, h: 90 };
+
+function blockRects() {
+  const xs = [WORLD.sandEdge, ...WORLD.roadsV, WORLD.w];
+  const ys = [0, ...WORLD.roadsH, WORLD.h];
+  const out = [];
+  for (let i = 0; i < xs.length - 1; i += 1) {
+    for (let j = 0; j < ys.length - 1; j += 1) {
+      out.push({ x0: xs[i], x1: xs[i + 1], y0: ys[j], y1: ys[j + 1] });
+    }
+  }
+  return out;
+}
+
+function blockKey(b) {
+  return `${Math.round(b.x0)}:${Math.round(b.y0)}`;
+}
+
+// Blocks that hold a named place instead of generic buildings.
+const SPECIAL = {
+  '600:500': 'pasar',
+  '2400:500': 'mall',
+  '2400:1700': 'bengkel',
+  '600:1700': 'rumah',
+  '1200:1100': 'taman',
+  '1800:500': 'hotel',
+  '1200:1700': 'stasiun',
+};
+
+const ROOFS = [PALETTE.roofA, PALETTE.roofB, PALETTE.roofC, PALETTE.roofD, PALETTE.roofE];
+
+export function buildCity() {
+  const rng = mulberry32(1337);
+  const buildings = [];
+  const trees = [];
+  const stalls = [];
+  for (const b of blockRects()) {
+    const key = blockKey(b);
+    const special = SPECIAL[key];
+    const ix0 = b.x0 + 78;
+    const ix1 = b.x1 - 78;
+    const iy0 = b.y0 + 78;
+    const iy1 = b.y1 - 78;
+    if (ix1 - ix0 < 90 || iy1 - iy0 < 90) continue;
+    if (special === 'taman') {
+      for (let i = 0; i < 14; i += 1) {
+        trees.push({ x: ix0 + rng() * (ix1 - ix0), y: iy0 + rng() * (iy1 - iy0), s: 12 + rng() * 8 });
+      }
+      continue;
+    }
+    if (special === 'pasar') {
+      for (let i = 0; i < 6; i += 1) {
+        stalls.push({
+          x: ix0 + 30 + (i % 3) * 150,
+          y: iy0 + 40 + Math.floor(i / 3) * 130,
+          w: 110,
+          h: 70,
+          color: ['#c96f4a', '#4a90c9', '#c9a44a'][i % 3],
+        });
+      }
+      continue;
+    }
+    if (special === 'mall') {
+      buildings.push({ x: ix0 + 40, y: iy0 + 20, w: ix1 - ix0 - 80, h: 150, roof: PALETTE.roofC, place: 'mall' });
+      continue;
+    }
+    if (special === 'bengkel') {
+      buildings.push({ x: ix0 + 60, y: iy0 + 30, w: 220, h: 150, roof: PALETTE.roofD, place: 'bengkel' });
+      continue;
+    }
+    if (special === 'rumah') {
+      buildings.push({ x: ix0 + 90, y: iy0 + 60, w: 180, h: 140, roof: PALETTE.roofA, place: 'rumah' });
+      for (let i = 0; i < 5; i += 1) {
+        trees.push({ x: ix0 + 40 + rng() * (ix1 - ix0 - 80), y: iy0 + 240 + rng() * 60, s: 11 + rng() * 6 });
+      }
+      continue;
+    }
+    if (special === 'hotel') {
+      buildings.push({ x: ix0 + 50, y: iy0 + 30, w: 200, h: 320, roof: PALETTE.roofB, place: 'hotel' });
+      continue;
+    }
+    if (special === 'stasiun') {
+      buildings.push({ x: ix0 + 40, y: iy0 + 40, w: ix1 - ix0 - 80, h: 130, roof: PALETTE.roofE, place: 'stasiun' });
+      continue;
+    }
+    // Generic block: one big building, or two small ones, or a green lot.
+    const roll = rng();
+    if (roll < 0.55) {
+      const w = 160 + rng() * 140;
+      const h = 130 + rng() * 120;
+      buildings.push({
+        x: ix0 + rng() * Math.max(1, ix1 - ix0 - w),
+        y: iy0 + rng() * Math.max(1, iy1 - iy0 - h),
+        w,
+        h,
+        roof: ROOFS[Math.floor(rng() * ROOFS.length)],
+      });
+    } else if (roll < 0.85) {
+      for (let i = 0; i < 2; i += 1) {
+        const w = 120 + rng() * 90;
+        const h = 100 + rng() * 80;
+        buildings.push({
+          x: ix0 + (i % 2) * ((ix1 - ix0) / 2) + 10,
+          y: iy0 + 20 + rng() * Math.max(1, iy1 - iy0 - h - 40),
+          w,
+          h,
+          roof: ROOFS[Math.floor(rng() * ROOFS.length)],
+        });
+      }
+    } else {
+      for (let i = 0; i < 6; i += 1) {
+        trees.push({ x: ix0 + rng() * (ix1 - ix0), y: iy0 + rng() * (iy1 - iy0), s: 11 + rng() * 7 });
       }
     }
-    // Palms along the beach.
-    for (let x = 120; x < WORLD_W; x += 260) {
-      this.trees.push({ x: x + rng() * 60, y: 2235 + rng() * 30, s: 1.1, palm: true });
+  }
+  return { buildings, trees, stalls, pier: PIER };
+}
+
+// --- Collision ------------------------------------------------------------
+
+// True when a circle of radius r at (x, y) hits something solid.
+export function solidAt(city, x, y, r) {
+  if (x < 14 + r || x > WORLD.w - 14 - r || y < 14 + r || y > WORLD.h - 14 - r) return true;
+  const onPier = x > PIER.x - r && x < PIER.x + PIER.w + r && y > PIER.y - r && y < PIER.y + PIER.h + r;
+  if (x < WORLD.seaEdge + r && !onPier) return true;
+  for (const b of city.buildings) {
+    if (x + r > b.x && x - r < b.x + b.w && y + r > b.y && y - r < b.y + b.h) return true;
+  }
+  return false;
+}
+
+// True when the point is on a road (with a small margin).
+export function onRoad(x, y) {
+  const half = WORLD.roadW / 2 + 6;
+  for (const vx of WORLD.roadsV) if (Math.abs(x - vx) < half) return true;
+  for (const hy of WORLD.roadsH) if (Math.abs(y - hy) < half) return true;
+  return false;
+}
+
+// True when the point sits on an intersection of two roads.
+export function atCrossing(x, y) {
+  const half = WORLD.roadW / 2 + 10;
+  const onV = WORLD.roadsV.some((vx) => Math.abs(x - vx) < half);
+  const onH = WORLD.roadsH.some((hy) => Math.abs(y - hy) < half);
+  return onV && onH;
+}
+
+// The road centre closest to (x, y) on the given axis.
+export function nearestRoad(axis, v) {
+  const list = axis === 'v' ? WORLD.roadsV : WORLD.roadsH;
+  let best = list[0];
+  for (const c of list) if (Math.abs(c - v) < Math.abs(best - v)) best = c;
+  return best;
+}
+
+// --- Drawing --------------------------------------------------------------
+
+function inView(cam, vw, vh, x, y, pad) {
+  return x > cam.x - pad && x < cam.x + vw + pad && y > cam.y - pad && y < cam.y + vh + pad;
+}
+
+export function drawCity(ctx, G) {
+  const { cam } = G;
+  const { vw, vh } = G;
+  const city = G.city;
+
+  // Ground
+  ctx.fillStyle = PALETTE.ground;
+  ctx.fillRect(cam.x, cam.y, vw, vh);
+
+  // Sea (west) with slow wave lines, then the sand strip.
+  ctx.fillStyle = PALETTE.seaDeep;
+  ctx.fillRect(cam.x, cam.y, Math.max(0, WORLD.seaEdge - cam.x), vh);
+  ctx.fillStyle = PALETTE.sea;
+  ctx.fillRect(cam.x, cam.y, Math.max(0, Math.min(WORLD.seaEdge, cam.x + vw) - cam.x), vh);
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 3; i += 1) {
+    const wy = ((G.time * 22 + i * 260) % 700) + cam.y - 100;
+    ctx.beginPath();
+    for (let x = 0; x <= WORLD.seaEdge; x += 24) {
+      const y = wy + Math.sin(x * 0.05 + G.time * 1.4 + i * 2) * 7;
+      if (x === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  ctx.fillStyle = PALETTE.sand;
+  ctx.fillRect(Math.max(cam.x, WORLD.seaEdge), cam.y, Math.max(0, Math.min(WORLD.sandEdge, cam.x + vw) - Math.max(cam.x, WORLD.seaEdge)), vh);
+
+  // Roads
+  ctx.fillStyle = PALETTE.road;
+  for (const vx of WORLD.roadsV) ctx.fillRect(vx - WORLD.roadW / 2, 0, WORLD.roadW, WORLD.h);
+  for (const hy of WORLD.roadsH) ctx.fillRect(0, hy - WORLD.roadW / 2, WORLD.w, WORLD.roadW);
+
+  // Centre dashes, clipped to the view.
+  ctx.fillStyle = PALETTE.roadLine;
+  for (const vx of WORLD.roadsV) {
+    if (vx < cam.x - 20 || vx > cam.x + vw + 20) continue;
+    for (let y = Math.floor(cam.y / 90) * 90; y < cam.y + vh; y += 90) {
+      if (WORLD.roadsH.some((hy) => Math.abs(y - hy) < 80)) continue;
+      ctx.fillRect(vx - 3, y, 6, 44);
+    }
+  }
+  for (const hy of WORLD.roadsH) {
+    if (hy < cam.y - 20 || hy > cam.y + vh + 20) continue;
+    for (let x = Math.floor(cam.x / 90) * 90; x < cam.x + vw; x += 90) {
+      if (WORLD.roadsV.some((vx) => Math.abs(x - vx) < 80)) continue;
+      ctx.fillRect(x, hy - 3, 44, 6);
     }
   }
 
-  // Point inside any solid rect (buildings or water, not the pier).
-  solidAt(x, y) {
-    if (x < 8 || y < 8 || x > WORLD_W - 8 || y > WORLD_H - 8) return true;
-    if (y >= this.water.y && !(x >= this.pier.x && x <= this.pier.x + this.pier.w && y <= this.pier.y + this.pier.h)) return true;
-    for (const s of this.solids) {
-      if (s.y < this.water.y && x >= s.x && x <= s.x + s.w && y >= s.y && y <= s.y + s.h) return true;
-    }
-    return false;
-  }
-
-  // Push a circle (x,y,r) out of solids. Mutates and returns the entity.
-  resolveCircle(e, r) {
-    for (const s of this.solids) {
-      const nx = Math.max(s.x, Math.min(e.x, s.x + s.w));
-      const ny = Math.max(s.y, Math.min(e.y, s.y + s.h));
-      const dx = e.x - nx, dy = e.y - ny;
-      const d2 = dx * dx + dy * dy;
-      if (d2 < r * r) {
-        if (d2 > 0.01) {
-          const d = Math.sqrt(d2);
-          e.x = nx + (dx / d) * r;
-          e.y = ny + (dy / d) * r;
-        } else {
-          e.y = s.y - r; // inside: push up out of the rect
-        }
+  // Crosswalks at every intersection in view.
+  ctx.fillStyle = 'rgba(240,240,230,0.75)';
+  for (const vx of WORLD.roadsV) {
+    for (const hy of WORLD.roadsH) {
+      if (!inView(cam, vw, vh, vx, hy, 90)) continue;
+      for (let i = -2; i <= 2; i += 1) {
+        ctx.fillRect(vx - 44 + i * 18, hy - 62, 10, 18);
+        ctx.fillRect(vx - 44 + i * 18, hy + 44, 10, 18);
       }
     }
-    e.x = Math.max(10, Math.min(WORLD_W - 10, e.x));
-    e.y = Math.max(10, Math.min(WORLD_H - 10, e.y));
-    return e;
   }
 
-  // A random point on a road (for spawning traffic / parked cars).
-  roadPoint(rng) {
-    if (rng() < 0.5) {
-      return { x: this.roadsV[Math.floor(rng() * this.roadsV.length)], y: 100 + rng() * (this.beach.y - 200), horizontal: false };
-    }
-    return { x: 100 + rng() * (WORLD_W - 200), y: this.roadsH[Math.floor(rng() * this.roadsH.length)], horizontal: true };
+  // Market stalls and the pier.
+  for (const s of city.stalls) {
+    if (!inView(cam, vw, vh, s.x, s.y, 120)) continue;
+    ctx.fillStyle = s.color;
+    ctx.fillRect(s.x, s.y, s.w, s.h);
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillRect(s.x + 6, s.y + 6, s.w - 12, 10);
+  }
+  ctx.fillStyle = '#8a6a44';
+  ctx.fillRect(PIER.x, PIER.y, PIER.w, PIER.h);
+  ctx.strokeStyle = '#6d5233';
+  ctx.lineWidth = 2;
+  for (let x = PIER.x + 20; x < PIER.x + PIER.w; x += 20) {
+    ctx.beginPath();
+    ctx.moveTo(x, PIER.y);
+    ctx.lineTo(x, PIER.y + PIER.h);
+    ctx.stroke();
   }
 
-  nearestRoad(x, y) {
-    let best = null, bd = 1e9;
-    for (const rx of this.roadsV) { const d = Math.abs(x - rx); if (d < bd) { bd = d; best = { x: rx, y, horizontal: false }; } }
-    for (const ry of this.roadsH) { const d = Math.abs(y - ry); if (d < bd) { bd = d; best = { x, y: ry, horizontal: true }; } }
-    return best;
+  // Buildings, trees, then place labels.
+  for (const b of city.buildings) {
+    if (inView(cam, vw, vh, b.x + b.w / 2, b.y + b.h / 2, 160)) drawBuilding(ctx, b);
+  }
+  for (const t of city.trees) {
+    if (inView(cam, vw, vh, t.x, t.y, 30)) drawTree(ctx, t.x, t.y, t.s);
   }
 
-  draw(ctx, cam, vw, vh) {
-    const x0 = Math.max(0, cam.x - 60), y0 = Math.max(0, cam.y - 60);
-    const x1 = Math.min(WORLD_W, cam.x + vw + 60), y1 = Math.min(WORLD_H, cam.y + vh + 60);
-    // Grass base.
-    ctx.fillStyle = PALETTE.grass;
-    ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
-    // City blocks.
-    ctx.fillStyle = PALETTE.block;
-    for (let ix = 0; ix < this.roadsV.length - 1; ix++) {
-      for (let iy = 0; iy < this.roadsH.length - 1; iy++) {
-        const bx = this.roadsV[ix] + ROAD_W / 2;
-        const by = this.roadsH[iy] + ROAD_W / 2;
-        if (bx + SPACING < x0 || bx > x1 || by + SPACING < y0 || by > y1) continue;
-        if (by + SPACING - ROAD_W > this.beach.y) continue;
-        ctx.fillRect(bx, by, SPACING - ROAD_W, SPACING - ROAD_W);
-      }
-    }
-    // Beach, water, pier.
-    ctx.fillStyle = PALETTE.sand;
-    ctx.fillRect(x0, this.beach.y, x1 - x0, this.beach.h);
-    ctx.fillStyle = PALETTE.water;
-    ctx.fillRect(x0, this.water.y, x1 - x0, this.water.h);
-    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-    ctx.lineWidth = 2;
-    for (let wy = this.water.y + 26; wy < this.water.y + this.water.h; wy += 44) {
-      ctx.beginPath();
-      for (let wx = Math.floor(x0 / 90) * 90; wx < x1; wx += 90) {
-        ctx.moveTo(wx, wy);
-        ctx.quadraticCurveTo(wx + 22, wy - 6, wx + 45, wy);
-      }
-      ctx.stroke();
-    }
-    ctx.fillStyle = '#a9805a';
-    ctx.fillRect(this.pier.x, this.pier.y, this.pier.w, this.pier.h);
-    ctx.strokeStyle = '#8a6b45';
-    ctx.lineWidth = 2;
-    for (let py = this.pier.y + 18; py < this.pier.y + this.pier.h; py += 18) {
-      ctx.beginPath(); ctx.moveTo(this.pier.x, py); ctx.lineTo(this.pier.x + this.pier.w, py); ctx.stroke();
-    }
-    // Roads.
-    ctx.fillStyle = PALETTE.road;
-    for (const rx of this.roadsV) ctx.fillRect(rx - ROAD_W / 2, 0, ROAD_W, this.beach.y);
-    for (const ry of this.roadsH) ctx.fillRect(0, ry - ROAD_W / 2, WORLD_W, ROAD_W);
-    // Sidewalks.
-    ctx.fillStyle = PALETTE.sidewalk;
-    for (const rx of this.roadsV) {
-      ctx.fillRect(rx - ROAD_W / 2 - 12, 0, 12, this.beach.y);
-      ctx.fillRect(rx + ROAD_W / 2, 0, 12, this.beach.y);
-    }
-    for (const ry of this.roadsH) {
-      ctx.fillRect(0, ry - ROAD_W / 2 - 12, WORLD_W, 12);
-      ctx.fillRect(0, ry + ROAD_W / 2, WORLD_W, 12);
-    }
-    // Centre dashes.
-    ctx.fillStyle = PALETTE.roadLine;
-    for (const rx of this.roadsV) {
-      for (let y = 0; y < this.beach.y; y += 56) ctx.fillRect(rx - 2, y, 4, 30);
-    }
-    for (const ry of this.roadsH) {
-      for (let x = 0; x < WORLD_W; x += 56) ctx.fillRect(x, ry - 2, 30, 4);
-    }
-    // Crosswalks at intersections.
-    ctx.fillStyle = 'rgba(255,255,255,0.75)';
-    for (const rx of this.roadsV) {
-      for (const ry of this.roadsH) {
-        for (let i = -3; i <= 3; i++) ctx.fillRect(rx + i * 11 - 3, ry - ROAD_W / 2 + 4, 6, 12);
-      }
-    }
-    // Buildings.
-    for (const b of this.buildings) {
-      if (b.x + b.w < x0 || b.x > x1 || b.y + b.h < y0 || b.y > y1) continue;
-      drawBuilding(ctx, b);
-    }
-    // Trees.
-    for (const t of this.trees) {
-      if (t.x < x0 || t.x > x1 || t.y < y0 || t.y > y1) continue;
-      if (t.palm) drawPalm(ctx, t.x, t.y, t.s);
-      else drawTree(ctx, t.x, t.y, t.s);
-    }
-    // Place labels.
-    ctx.font = 'bold 13px system-ui, sans-serif';
-    ctx.textAlign = 'center';
-    for (const p of Object.values(PLACES)) {
-      if (p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1) continue;
-      ctx.fillStyle = 'rgba(255,255,255,0.85)';
-      const w = ctx.measureText(p.name).width + 14;
-      ctx.fillRect(p.x - w / 2, p.y - 34, w, 20);
-      ctx.fillStyle = '#2c3242';
-      ctx.fillText(p.name, p.x, p.y - 20);
-    }
-    // Plaza fountain.
-    ctx.fillStyle = '#3d9bd6';
-    ctx.beginPath(); ctx.arc(1800, 1575, 34, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#e8f4ff';
-    ctx.beginPath(); ctx.arc(1800, 1575, 20, 0, Math.PI * 2); ctx.fill();
+  ctx.save();
+  ctx.font = 'bold 15px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  for (const key of Object.keys(PLACES)) {
+    const p = PLACES[key];
+    if (!inView(cam, vw, vh, p.x, p.y, 140)) continue;
+    const tw = ctx.measureText(p.name).width + 18;
+    ctx.fillStyle = 'rgba(20,26,34,0.62)';
+    ctx.beginPath();
+    ctx.roundRect(p.x - tw / 2, p.y - 42, tw, 22, 11);
+    ctx.fill();
+    ctx.fillStyle = '#f5efdd';
+    ctx.fillText(p.name, p.x, p.y - 27);
   }
+  ctx.restore();
 }

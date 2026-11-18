@@ -1,460 +1,329 @@
-// main.js — Teluk Cerah: an original open-world crime game in 2D top-down.
-// Rani, a courier from Teluk Cerah, takes jobs from Dimas, a local fixer:
-// deliver a package, repo a gold car, then outrun a police chase.
-// No network, no external assets — everything is drawn in code.
+// Teluk Cerah — entry point.
+//
+// Builds the shared game state, runs the loop, reads the keyboard, moves
+// the camera, and wires the systems together. It also owns the two things
+// the other modules do not: the save file (localStorage) and the staging
+// API the screenshots use (?shot=chase|drive|steal|combat, ?seed=N).
+//
+// The game is plain ES modules loaded by game/index.html; nothing here
+// needs the network.
 
-import { City, PLACES, WORLD_W, WORLD_H } from './city.js';
-import { AudioSys } from './audio.js';
-import { Player } from './player.js';
-import { Car, spawnParkedCars } from './vehicles.js';
-import { Traffic } from './traffic.js';
-import { Police } from './police.js';
-import { Missions } from './missions.js';
+import { buildCity, mulberry32, WORLD, PLACES } from './city.js';
+import { createAudio, ensureAudio, sfx, updateAudio, setMuted } from './audio.js';
+import { createPlayer, updatePlayer, drawPlayer } from './player.js';
+import { initTraffic, updateTraffic, drawTraffic } from './traffic.js';
+import { updatePolice, drawPolice } from './police.js';
+import { startMission, updateMissions } from './missions.js';
+import { drawCity } from './city.js';
 import { drawHUD } from './hud.js';
-import { drawCar } from './assets.js';
+import { makeCar } from './vehicles.js';
 
 const SAVE_KEY = 'telukcerah-save-v1';
 
-const S = {
-  mode: 'menu', // menu | play | pause | over
-  overReason: '',
-  time: 0,
-  cash: 0,
-  best: 0,
-  missionsDone: 0,
-  keys: new Set(),
-  cam: { x: 0, y: 0 },
-  banner: null,
-  bannerT: 0,
-  city: null,
-  player: null,
-  traffic: null,
-  police: null,
-  missions: null,
-  parkedCars: [],
-  audio: new AudioSys(),
-  canvas: null,
-  ctx: null,
-  vw: 1280,
-  vh: 720,
-};
-
-S.setBanner = (title, sub, secs) => { S.banner = { title, sub }; S.bannerT = secs; };
-
-S.save = () => {
-  try {
-    localStorage.setItem(SAVE_KEY, JSON.stringify({ cash: S.cash, best: S.best, missionsDone: S.missionsDone }));
-  } catch { /* storage unavailable — play on without saving */ }
-};
-
-S.load = () => {
+function readSave() {
   try {
     const raw = localStorage.getItem(SAVE_KEY);
-    if (!raw) return;
-    const d = JSON.parse(raw);
-    S.cash = d.cash || 0;
-    S.best = d.best || 0;
-    S.missionsDone = d.missionsDone || 0;
-  } catch { /* ignore a corrupt save */ }
-};
-
-S.gameOver = (reason) => {
-  if (S.mode !== 'play') return;
-  S.mode = 'over';
-  S.overReason = reason;
-  S.best = Math.max(S.best, S.cash);
-  S.save();
-  S.audio.stopAll();
-  S.audio.busted();
-};
-
-S.hintText = () => {
-  const p = S.player;
-  if (S.mode !== 'play') return '';
-  if (p.inCar) return 'E — Keluar mobil   •   P — Jeda   •   M — Suara';
-  const def = S.missions.current;
-  if (def) {
-    const wp = S.missions.waypoint();
-    if (wp && Math.hypot(p.x - wp.x, p.y - wp.y) < 90) {
-      if (def.id === 1 && S.missions.stage === 'toPickup') return 'E — Ambil paket';
-      if (def.id === 1) return 'E — Serahkan paket';
-      if (def.id === 2 && S.missions.stage === 'toDeliver') return 'E — Serahkan mobil';
-    }
-  }
-  const near = nearestCar(p.x, p.y, 70);
-  if (near) return 'E — Masuk mobil';
-  return 'WASD — Jalan   •   F — Pukul   •   E — Masuk mobil';
-};
-
-function nearestCar(x, y, maxD) {
-  let best = null, bd = maxD;
-  for (const c of S.parkedCars) {
-    const d = Math.hypot(c.x - x, c.y - y);
-    if (d < bd) { bd = d; best = c; }
-  }
-  return best;
-}
-
-function enterExitCar() {
-  const p = S.player;
-  // Mission interaction first (package pickup / delivery), even from a car.
-  if (S.missions.tryInteract(S)) return;
-  if (p.inCar) {
-    const car = p.inCar;
-    car.parked = true;
-    p.x = car.x + Math.cos(car.angle + Math.PI / 2) * 34;
-    p.y = car.y + Math.sin(car.angle + Math.PI / 2) * 34;
-    S.city.resolveCircle(p, 14);
-    p.inCar = null;
-    S.audio.click();
-    return;
-  }
-  const car = nearestCar(p.x, p.y, 70);
-  if (car) {
-    p.inCar = car;
-    car.parked = false;
-    p.x = car.x; p.y = car.y;
-    S.audio.click();
-    if (car.target) {
-      // Stealing the gold mission car is a crime, handled by the mission.
-    } else if (car !== S.missions.targetCar) {
-      S.police.addWanted(1, 'Mobil dicuri!');
-      S.setBanner('Mobil dicuri!', 'Seseorang melihatmu — bintang wanted naik.', 2.5);
-    }
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
   }
 }
 
-// Combat: punching pedestrians and foot officers.
-S.combat = {
-  punch(player) {
-    const range = 42, arc = 1.15;
-    for (const ped of S.traffic.peds) {
-      if (ped.down > 0) continue;
-      const dx = ped.x - player.x, dy = ped.y - player.y;
-      const d = Math.hypot(dx, dy);
-      if (d > range) continue;
-      let diff = Math.atan2(dy, dx) - player.angle;
-      while (diff > Math.PI) diff -= Math.PI * 2;
-      while (diff < -Math.PI) diff += Math.PI * 2;
-      if (Math.abs(diff) < arc) {
-        ped.hit(S, false);
-        ped.flee = 3;
-      }
+function writeSave(G) {
+  try {
+    localStorage.setItem(SAVE_KEY, JSON.stringify({
+      cash: G.player.cash,
+      health: G.player.health,
+      missionIdx: G.missionIdx,
+      missionStage: G.missionStage,
+      x: G.player.x,
+      y: G.player.y,
+      wanted: G.player.wanted,
+    }));
+    G.hasSave = true;
+  } catch (e) {
+    /* storage unavailable: the game still plays */
+  }
+}
+
+function buildState(seed) {
+  const rng = mulberry32(seed);
+  const G = {
+    mode: 'menu',
+    overReason: '',
+    time: 0,
+    seed,
+    rng,
+    keys: Object.create(null),
+    pressed: new Set(),
+    cam: { x: 0, y: 0 },
+    vw: 1280,
+    vh: 720,
+    city: null,
+    player: null,
+    cars: [],
+    peds: [],
+    goldCar: null,
+    missionIdx: 0,
+    missionStage: 'pickup',
+    missionTarget: null,
+    objective: 'Tekan Enter untuk main',
+    banner: { title: '', sub: '', t: 0 },
+    // A short-lived message under the banner (a ram, a near miss) that
+    // never replaces the mission banner.
+    toast: { title: '', sub: '', t: 0 },
+    audio: createAudio(),
+    stats: { stolen: 0, knocked: 0 },
+    quietT: 0,
+    prevWanted: 0,
+    spawnT: 0,
+    hasSave: !!readSave(),
+    shot: null,
+  };
+  G.city = buildCity();
+  G.player = createPlayer(700, 760);
+  initTraffic(G);
+  startMission(G, 0);
+  // Arrow closes over this state object, so re-bind it after any reset.
+  G.saveGame = () => writeSave(G);
+  return G;
+}
+
+function resetWorld(G) {
+  const keepSeed = G.seed;
+  const fresh = buildState(keepSeed);
+  // Keep the same object identity so the loop and the test hook keep working.
+  for (const key of Object.keys(fresh)) {
+    if (key === 'audio' || key === 'keys' || key === 'pressed') continue;
+    G[key] = fresh[key];
+  }
+  G.saveGame = () => writeSave(G);
+  G.mode = 'play';
+  G.banner = { title: 'Teluk Cerah', sub: 'Selamat datang, Rani. Dimas menunggumu.', t: 3 };
+}
+
+function restoreMission(G, idx, stage) {
+  startMission(G, idx);
+  if (idx === 0 && stage === 'deliver') {
+    G.missionStage = 'deliver';
+    G.missionTarget = { x: PLACES.dermaga.x, y: PLACES.dermaga.y, r: PLACES.dermaga.r, label: 'Dermaga Teluk' };
+    G.objective = 'Antar paket ke Dermaga Teluk';
+  } else if (idx === 1 && stage === 'deliver') {
+    G.missionStage = 'deliver';
+    G.missionTarget = { x: PLACES.bengkel.x, y: PLACES.bengkel.y, r: PLACES.bengkel.r, label: 'Bengkel Roda' };
+    G.objective = 'Bawa mobil emas ke Bengkel Roda';
+  }
+}
+
+function loadGame(G) {
+  const s = readSave();
+  if (!s) return false;
+  G.player.cash = s.cash || 0;
+  G.player.health = s.health || 100;
+  G.player.x = s.x || 700;
+  G.player.y = s.y || 760;
+  G.player.wanted = 0;
+  restoreMission(G, s.missionIdx || 0, s.missionStage || 'pickup');
+  if (typeof s.wanted === 'number') G.player.wanted = Math.min(3, s.wanted);
+  G.mode = 'play';
+  return true;
+}
+
+// --- Staging --------------------------------------------------------------
+// ?shot= puts the game straight into a scene for screenshots, with a fixed
+// seed so the shot is reproducible. The player never sees the menu.
+
+function putPlayerInCar(G, car) {
+  const p = G.player;
+  p.onFoot = false;
+  p.car = car;
+  car.driven = true;
+  car.speed = 260;
+  p.x = car.x;
+  p.y = car.y;
+  p.angle = car.angle;
+}
+
+function addCopNear(G, x, y, angle) {
+  const cop = makeCar(x, y, angle, '#e8e8e8', 'cop');
+  cop.speed = 320;
+  G.cars.push(cop);
+  return cop;
+}
+
+function stageShot(G, name) {
+  const p = G.player;
+  G.mode = 'play';
+  if (name === 'chase') {
+    const car = G.cars.find((c) => c.kind === 'traffic');
+    car.x = 1500;
+    car.y = 1100;
+    car.axis = 'h';
+    car.dir = 1;
+    car.road = 1100;
+    car.lane = 17;
+    car.angle = 0;
+    putPlayerInCar(G, car);
+    p.wanted = 3;
+    addCopNear(G, 1250, 1100, 0);
+    addCopNear(G, 1180, 1134, 0);
+    addCopNear(G, 1330, 1066, 0);
+    startMission(G, 0);
+    G.banner = { title: 'Misi 1 — Paket Kilat', sub: 'Antar paket ke Dermaga Teluk.', t: 30 };
+    // The staged driver floors it, so the chase is moving, not parked.
+    G.keys['w'] = true;
+  } else if (name === 'drive') {
+    const car = G.cars.find((c) => c.kind === 'traffic');
+    car.x = 1800;
+    car.y = 900;
+    car.axis = 'v';
+    car.dir = 1;
+    car.road = 1800;
+    car.lane = 17;
+    car.angle = Math.PI / 2;
+    putPlayerInCar(G, car);
+    p.wanted = 0;
+    startMission(G, 0);
+    G.banner = { title: 'Misi 1 — Paket Kilat', sub: 'Antar paket ke Dermaga Teluk.', t: 30 };
+    G.keys['w'] = true;
+  } else if (name === 'steal') {
+    p.x = 2660;
+    p.y = 950;
+    p.angle = -Math.PI / 2;
+    p.onFoot = true;
+    p.car = null;
+    p.wanted = 0;
+    startMission(G, 1);
+    G.banner = { title: 'Misi 2 — Tarik Mobil', sub: 'Curi mobil emas di Parkir Mall.', t: 30 };
+  } else if (name === 'combat') {
+    // An open stretch of road, away from place labels, so Rani and the
+    // punch are the focus of the frame.
+    p.x = 1250;
+    p.y = 1150;
+    p.angle = 0;
+    p.onFoot = true;
+    p.car = null;
+    p.wanted = 1;
+    p.punchT = 0.22;
+    for (let i = 0; i < 3; i += 1) {
+      G.peds.push({
+        x: 1300 + i * 46,
+        y: 1130 + (i % 2) * 50,
+        angle: Math.PI,
+        speed: 50,
+        color: ['#c96f4a', '#4a90c9', '#7d5a9e'][i],
+        down: i === 2 ? 4 : 0,
+        wanderT: 3,
+        fleeT: 0,
+      });
     }
-    for (const f of S.police.footCops) {
-      const dx = f.x - player.x, dy = f.y - player.y;
-      const d = Math.hypot(dx, dy);
-      if (d > range) continue;
-      let diff = Math.atan2(dy, dx) - player.angle;
-      while (diff > Math.PI) diff -= Math.PI * 2;
-      while (diff < -Math.PI) diff += Math.PI * 2;
-      if (Math.abs(diff) < arc) {
-        f.hp -= 20;
-        S.police.addWanted(1, 'Menyerang polisi!');
-        S.audio.punch();
-      }
-    }
+    startMission(G, 0);
+    G.banner = { title: 'Misi 1 — Paket Kilat', sub: 'Antar paket ke Dermaga Teluk.', t: 30 };
+  }
+  G.cam.x = Math.max(0, Math.min(WORLD.w - G.vw, p.x - G.vw / 2));
+  G.cam.y = Math.max(0, Math.min(WORLD.h - G.vh, p.y - G.vh / 2));
+}
+
+// --- Boot -----------------------------------------------------------------
+
+const params = new URLSearchParams(window.location.search);
+const seedParam = Number.parseInt(params.get('seed') || '', 10);
+const seed = Number.isSafeInteger(seedParam) ? seedParam : (Math.random() * 1e9) | 0;
+const G = buildState(seed);
+const shot = params.get('shot');
+if (shot) {
+  G.shot = shot;
+  stageShot(G, shot);
+}
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+window.addEventListener('keydown', (e) => {
+  const key = e.key.toLowerCase();
+  if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(key)) e.preventDefault();
+  if (!e.repeat) G.pressed.add(key);
+  G.keys[key] = true;
+  ensureAudio(G.audio);
+  if (key === 'enter' && G.mode === 'menu') {
+    resetWorld(G);
+    sfx(G.audio, 'click');
+  } else if (key === 'l' && G.mode === 'menu') {
+    if (loadGame(G)) sfx(G.audio, 'click');
+  } else if (key === 'p' && (G.mode === 'play' || G.mode === 'paused')) {
+    G.mode = G.mode === 'play' ? 'paused' : 'play';
+    sfx(G.audio, 'click');
+  } else if (key === 'm') {
+    setMuted(G.audio, !G.audio.muted);
+  } else if (key === 'r' && G.mode === 'over') {
+    resetWorld(G);
+    sfx(G.audio, 'click');
+  }
+});
+window.addEventListener('keyup', (e) => {
+  G.keys[e.key.toLowerCase()] = false;
+});
+canvas.addEventListener('pointerdown', () => ensureAudio(G.audio));
+
+// Test hook for scripted playthroughs: window.__tc
+window.__tc = {
+  G,
+  state() {
+    const p = G.player;
+    return {
+      mode: G.mode,
+      missionIdx: G.missionIdx,
+      missionStage: G.missionStage,
+      cash: p.cash,
+      wanted: p.wanted,
+      health: Math.round(p.health),
+      x: Math.round(p.x),
+      y: Math.round(p.y),
+      onFoot: p.onFoot,
+      inCar: !p.onFoot,
+      cops: G.cars.filter((c) => c.kind === 'cop').length,
+      pedsDown: G.peds.filter((d) => d.down > 0).length,
+      objective: G.objective,
+    };
   },
 };
 
-function resetRun() {
-  S.city = new City(citySeed);
-  S.player = new Player(PLACES.plaza.x, PLACES.plaza.y + 60);
-  S.parkedCars = spawnParkedCars(S.city, 16);
-  S.traffic = new Traffic(S.city);
-  S.police = new Police(S.city);
-  S.police.onWantedUp = (n, reason) => {
-    S.audio.wantedUp();
-    if (reason) S.setBanner(`WANTED ★${n}`, reason, 2.5);
-  };
-  S.missions = new Missions(S);
-  S.banner = null; S.bannerT = 0;
-  S.cam.x = S.player.x - S.vw / 2;
-  S.cam.y = S.player.y - S.vh / 2;
-}
+let last = performance.now();
 
-function startGame() {
-  resetRun();
-  S.mode = 'play';
-  S.missions.start();
-  S.audio.ensure();
-  S.audio.click();
-}
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  G.time += dt;
+  if (G.banner) G.banner.t = Math.max(0, G.banner.t - dt);
+  if (G.toast) G.toast.t = Math.max(0, G.toast.t - dt);
 
-function update(dt) {
-  S.time += dt;
-  if (S.bannerT > 0) S.bannerT -= dt;
-  if (S.mode !== 'play') return;
-  const p = S.player;
-  if (p.inCar) {
-    const moving = p.inCar.drive(dt, S.keys, S);
-    p.x = p.inCar.x; p.y = p.inCar.y;
-    p.angle = p.inCar.angle;
-    S.audio.engine(true, Math.min(1, Math.abs(p.inCar.speed) / 400));
-    // Bump into traffic cars.
-    for (const c of S.traffic.cars) {
-      const d = Math.hypot(c.x - p.inCar.x, c.y - p.inCar.y);
-      if (d < 42 && d > 0.1) {
-        const push = (42 - d) / 2;
-        const nx = (c.x - p.inCar.x) / d, ny = (c.y - p.inCar.y) / d;
-        c.x += nx * push; c.y += ny * push;
-        p.inCar.x -= nx * push; p.inCar.y -= ny * push;
-        if (Math.abs(p.inCar.speed) > 180) {
-          S.audio.crash();
-          p.inCar.speed *= 0.5;
-          p.damage(5, S);
-        } else {
-          p.inCar.speed *= 0.85;
-        }
-      }
-    }
-  } else {
-    p.update(dt, S.keys, S);
-    S.audio.engine(false, 0);
-  }
-  S.traffic.update(dt, S);
-  S.police.update(dt, S);
-  S.missions.update(dt, S);
-  // Camera follows the player.
-  const fx = p.inCar ? p.inCar.x : p.x;
-  const fy = p.inCar ? p.inCar.y : p.y;
-  const tx = Math.max(0, Math.min(WORLD_W - S.vw, fx - S.vw / 2));
-  const ty = Math.max(0, Math.min(WORLD_H - S.vh, fy - S.vh / 2));
-  S.cam.x += (tx - S.cam.x) * Math.min(1, dt * 6);
-  S.cam.y += (ty - S.cam.y) * Math.min(1, dt * 6);
-}
-
-function draw() {
-  const ctx = S.ctx, vw = S.vw, vh = S.vh;
-  ctx.clearRect(0, 0, vw, vh);
-  if (S.mode === 'menu') {
-    // Slow pan over the plaza behind the title.
-    S.cam.x = 1800 - vw / 2 + Math.sin(S.time * 0.08) * 260;
-    S.cam.y = 1575 - vh / 2 + Math.cos(S.time * 0.06) * 160;
-    ctx.save();
-    ctx.translate(-S.cam.x, -S.cam.y);
-    S.city.draw(ctx, S.cam, vw, vh);
-    ctx.restore();
-    ctx.fillStyle = 'rgba(8,12,20,0.72)';
-    ctx.fillRect(0, 0, vw, vh);
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#ffd21f';
-    ctx.font = 'bold 64px system-ui, sans-serif';
-    ctx.fillText('TELUK CERAH', vw / 2, vh * 0.26);
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold 20px system-ui, sans-serif';
-    ctx.fillText('Kota terbuka di tepi teluk — antar paket, tarik mobil, kabur dari polisi.', vw / 2, vh * 0.26 + 36);
-    ctx.font = '16px system-ui, sans-serif';
-    ctx.fillStyle = '#cfe3ff';
-    const lines = [
-      'Rani, kurir Teluk Cerah, mengambil pekerjaan dari Dimas, sang fixer.',
-      'Tiga misi menantimu: Paket Kilat, Tarik Mobil, dan Jalan Keluar.',
-      '',
-      'WASD / Panah — Jalan & mengemudi      E — Masuk / keluar mobil, ambil paket',
-      'F / Spasi — Pukul      P — Jeda      M — Suara      R — Ulangi',
-      '',
-      `Uang: $${S.cash}   •   Misi selesai: ${S.missionsDone} / 3   •   Rekor uang: $${S.best}`,
-    ];
-    lines.forEach((l, i) => ctx.fillText(l, vw / 2, vh * 0.42 + i * 26));
-    ctx.fillStyle = '#ffd21f';
-    ctx.font = 'bold 24px system-ui, sans-serif';
-    ctx.fillText('Tekan ENTER untuk mulai', vw / 2, vh * 0.42 + lines.length * 26 + 22);
-    ctx.textAlign = 'left';
-    return;
+  if (G.mode === 'play') {
+    updateMissions(G, dt);
+    updatePlayer(G, dt);
+    updateTraffic(G, dt);
+    updatePolice(G, dt);
+    const speed = G.player.onFoot ? 0 : Math.abs(G.player.car ? G.player.car.speed : 0);
+    updateAudio(G.audio, speed, !G.player.onFoot, G.player.wanted, dt);
+    // Camera follows the player, clamped to the city.
+    const tx = Math.max(0, Math.min(WORLD.w - G.vw, G.player.x - G.vw / 2));
+    const ty = Math.max(0, Math.min(WORLD.h - G.vh, G.player.y - G.vh / 2));
+    const k = Math.min(1, dt * 5);
+    G.cam.x += (tx - G.cam.x) * k;
+    G.cam.y += (ty - G.cam.y) * k;
   }
 
+  ctx.clearRect(0, 0, G.vw, G.vh);
   ctx.save();
-  ctx.translate(-Math.round(S.cam.x), -Math.round(S.cam.y));
-  S.city.draw(ctx, S.cam, vw, vh);
-  S.missions.drawMarker(ctx, S.cam, vw, vh);
-  for (const c of S.parkedCars) {
-    if (c === S.player.inCar) continue;
-    c.draw(ctx);
-  }
-  S.traffic.draw(ctx);
-  if (S.player.inCar) S.player.inCar.draw(ctx);
-  else S.player.draw(ctx);
-  S.police.draw(ctx);
+  ctx.translate(-Math.round(G.cam.x), -Math.round(G.cam.y));
+  drawCity(ctx, G);
+  drawTraffic(ctx, G);
+  drawPolice(ctx, G);
+  drawPlayer(ctx, G);
   ctx.restore();
+  drawHUD(ctx, G);
 
-  drawHUD(ctx, S, vw, vh);
-
-  if (S.mode === 'pause') {
-    ctx.fillStyle = 'rgba(8,12,20,0.6)';
-    ctx.fillRect(0, 0, vw, vh);
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold 40px system-ui, sans-serif';
-    ctx.fillText('JEDA', vw / 2, vh / 2 - 10);
-    ctx.font = '17px system-ui, sans-serif';
-    ctx.fillText('Tekan P untuk lanjut — M untuk suara', vw / 2, vh / 2 + 28);
-    ctx.textAlign = 'left';
-  }
-
-  if (S.mode === 'over') {
-    ctx.fillStyle = 'rgba(8,12,20,0.78)';
-    ctx.fillRect(0, 0, vw, vh);
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#ff5a4e';
-    ctx.font = 'bold 44px system-ui, sans-serif';
-    ctx.fillText('GAME OVER', vw / 2, vh / 2 - 40);
-    ctx.fillStyle = '#fff';
-    ctx.font = '19px system-ui, sans-serif';
-    ctx.fillText(S.overReason, vw / 2, vh / 2);
-    ctx.fillStyle = '#ffd21f';
-    ctx.font = 'bold 20px system-ui, sans-serif';
-    ctx.fillText(`Uang: $${S.cash}   •   Misi selesai: ${S.missions.done} / 3`, vw / 2, vh / 2 + 40);
-    ctx.fillStyle = '#fff';
-    ctx.font = '17px system-ui, sans-serif';
-    ctx.fillText('Tekan R untuk main lagi', vw / 2, vh / 2 + 78);
-    ctx.textAlign = 'left';
-  }
+  G.pressed.clear();
+  requestAnimationFrame(frame);
 }
 
-let lastT = 0;
-function loop(t) {
-  const dt = Math.min(0.05, (t - lastT) / 1000 || 0.016);
-  lastT = t;
-  update(dt);
-  draw();
-  requestAnimationFrame(loop);
-}
-
-// --- Input ---
-const params = new URLSearchParams(location.search);
-const citySeed = Number(params.get('seed') || 20261124) || 20261124;
-
-function onKeyDown(e) {
-  S.audio.ensure();
-  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
-  if (e.repeat) return;
-  S.keys.add(e.code);
-  if (e.code === 'Enter' && S.mode === 'menu') { startGame(); return; }
-  if (e.code === 'KeyR' && S.mode === 'over') { startGame(); return; }
-  if (e.code === 'KeyP' || e.code === 'Escape') {
-    if (S.mode === 'play') { S.mode = 'pause'; S.audio.stopAll(); }
-    else if (S.mode === 'pause') { S.mode = 'play'; }
-    return;
-  }
-  if (e.code === 'KeyM') {
-    S.audio.setMuted(!S.audio.muted);
-    return;
-  }
-  if ((e.code === 'KeyF' || e.code === 'Space') && S.mode === 'play') S.player.tryPunch(S);
-  if (e.code === 'KeyE' && S.mode === 'play') enterExitCar();
-}
-function onKeyUp(e) { S.keys.delete(e.code); }
-
-function resize() {
-  S.vw = window.innerWidth;
-  S.vh = window.innerHeight;
-  S.canvas.width = S.vw;
-  S.canvas.height = S.vh;
-}
-
-function boot() {
-  S.canvas = document.getElementById('game');
-  S.ctx = S.canvas.getContext('2d');
-  S.load();
-  resetRun();
-  resize();
-  window.addEventListener('resize', resize);
-  window.addEventListener('keydown', onKeyDown);
-  window.addEventListener('keyup', onKeyUp);
-  window.addEventListener('pointerdown', () => S.audio.ensure());
-  const status = document.getElementById('status');
-  if (status) status.textContent = 'Teluk Cerah: tekan Enter untuk mulai bermain.';
-  requestAnimationFrame(loop);
-  // Staging hooks for scripted screenshots (also reachable by hand in devtools).
-  window.__tc = {
-    S,
-    start: startGame,
-    stage: stageShot,
-    state: () => ({
-      mode: S.mode,
-      cash: S.cash,
-      hp: S.player.hp,
-      wanted: S.police.wanted,
-      cops: S.police.cops.length,
-      mission: S.missions.current ? S.missions.current.title : 'none',
-      stage: S.missions.stage,
-      objective: S.missions.objectiveText(),
-      inCar: !!S.player.inCar,
-      x: Math.round(S.player.x),
-      y: Math.round(S.player.y),
-    }),
-    ready: true,
-  };
-  // URL staging: ?shot=chase|drive|steal|combat
-  const shot = params.get('shot');
-  if (shot) setTimeout(() => { startGame(); stageShot(shot); }, 400);
-}
-
-// --- Scripted staging for screenshots ---
-function stageShot(name) {
-  const p = S.player;
-  if (name === 'chase') {
-    // Cover: police chase with wanted stars, minimap and mission objective.
-    const car = new Car(1800, 1125, 0, '#d94f3d', { parked: false });
-    car.speed = 240;
-    S.parkedCars.push(car);
-    p.inCar = car;
-    p.x = car.x; p.y = car.y;
-    S.cash = 150;
-    S.police.addWanted(3, 'Polisi mengejarmu!');
-    S.police.cops.push(new Car(1800 - 190, 1125 - 60, 0, '#f2f2f2', { police: true, maxSpeed: 430 }));
-    S.police.cops.push(new Car(1800 - 260, 1125 + 60, 0, '#f2f2f2', { police: true, maxSpeed: 430 }));
-    for (const c of S.police.cops) { c.speed = 260; c.angle = 0; }
-    S.missions.stage = 'toDeliver';
-    S.setBanner('Misi 1 — Paket Kilat', 'Antar paket ke Dermaga Teluk.', 600);
-  } else if (name === 'drive') {
-    const car = new Car(1575, 675, 0, '#3d7bd9', { parked: false });
-    car.speed = 300;
-    S.parkedCars.push(car);
-    p.inCar = car;
-    p.x = car.x; p.y = car.y;
-    S.cash = 150;
-    // Traffic nearby on the same road.
-    for (let i = 0; i < 4; i++) {
-      const t = S.traffic.cars[i];
-      t.x = 1575 - 260 + i * 170;
-      t.y = 675 + (i % 2 === 0 ? -14 : 14);
-      t.angle = 0; t.horizontal = true; t.speed = t.cruise;
-    }
-    S.setBanner('Misi 2 — Tarik Mobil', 'Curi mobil emas di Parkir Mall.', 600);
-  } else if (name === 'steal') {
-    // On foot next to the gold mission car at the mall parking lot.
-    S.missions.startMission(1);
-    p.x = PLACES.parking.x - 60;
-    p.y = PLACES.parking.y + 40;
-    p.angle = 0;
-    S.cash = 150;
-  } else if (name === 'combat') {
-    // On foot, punching, with pedestrians and a foot officer close by.
-    // Staged on the open road junction east of the plaza (not on the fountain).
-    p.x = 2025;
-    p.y = 1575;
-    p.angle = -0.4;
-    p.punchT = 0.22;
-    p.punchCooldown = 0.4;
-    S.police.addWanted(1, 'Keributan di Alun-Alun!');
-    const peds = S.traffic.peds;
-    peds[0].x = p.x + 34; peds[0].y = p.y - 8; peds[0].down = 0;
-    peds[1].x = p.x + 60; peds[1].y = p.y + 34; peds[1].flee = 2;
-    S.police.footCops.push({ x: p.x + 90, y: p.y - 40, angle: Math.PI, hp: 50, walkPhase: 1, punchT: 0 });
-    S.setBanner('Misi 1 — Paket Kilat', 'Ambil paket di Pasar Pagi.', 600);
-  }
-  S.cam.x = Math.max(0, Math.min(WORLD_W - S.vw, (p.inCar ? p.inCar.x : p.x) - S.vw / 2));
-  S.cam.y = Math.max(0, Math.min(WORLD_H - S.vh, (p.inCar ? p.inCar.y : p.y) - S.vh / 2));
-  if (name === 'chase') {
-    // Keep the top HUD band clear for the cover shot: nudge any car that
-    // would sit under the objective bar / wanted stars down out of the frame.
-    // (The player's car and the police cars are mid-frame, so they stay.)
-    const clearTop = (c) => { if (c.y - S.cam.y < 70) c.y += 240; };
-    for (const c of S.parkedCars) clearTop(c);
-    for (const c of S.traffic.cars) clearTop(c);
-    for (const c of S.police.cops) clearTop(c);
-  }
-}
-
-boot();
+requestAnimationFrame(frame);
