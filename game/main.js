@@ -446,6 +446,15 @@ function stageShot(name) {
   }
   S.cam.x = Math.max(0, Math.min(WORLD_W - S.vw, (p.inCar ? p.inCar.x : p.x) - S.vw / 2));
   S.cam.y = Math.max(0, Math.min(WORLD_H - S.vh, (p.inCar ? p.inCar.y : p.y) - S.vh / 2));
+  if (name === 'chase') {
+    // Keep the top HUD band clear for the cover shot: nudge any car that
+    // would sit under the objective bar / wanted stars down out of the frame.
+    // (The player's car and the police cars are mid-frame, so they stay.)
+    const clearTop = (c) => { if (c.y - S.cam.y < 70) c.y += 240; };
+    for (const c of S.parkedCars) clearTop(c);
+    for (const c of S.traffic.cars) clearTop(c);
+    for (const c of S.police.cops) clearTop(c);
+  }
 }
 
 boot();
