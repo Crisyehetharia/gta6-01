@@ -1,133 +1,108 @@
-// Teluk Cerah — cars.
-//
-// A car is a small top-down body with simple arcade physics: throttle,
-// brake/reverse, steering that bites harder the faster you go, and
-// axis-separated movement so cars slide along walls instead of sticking.
-// Kinds: 'traffic' (drives the roads), 'parked', 'cop' and 'gold'
-// (the mission target car). Drawing lives here too.
+// Bandar Pelita — cars: physics, spawning, drawing.
+const Cars = (() => {
+  const COLORS = PAL.car;
+  let nextId = 1;
 
-import { PALETTE, rr } from './assets.js';
-import { solidAt } from './city.js';
-
-const CAR_COLORS = ['#c94f4f', '#4f7ec9', '#e8e4da', '#5a6b7d', '#c98a4a', '#7d5a9e', '#4a9e7d'];
-
-export function randomCarColor(rng) {
-  return CAR_COLORS[Math.floor(rng() * CAR_COLORS.length)];
-}
-
-export function makeCar(x, y, angle, color, kind) {
-  return {
-    x,
-    y,
-    angle,
-    speed: 0,
-    color,
-    kind,
-    w: 48,
-    h: 26,
-    // traffic AI state
-    axis: 'v',
-    dir: 1,
-    lane: 0,
-    road: 0,
-    // police / ramming state
-    hitCd: 0,
-    flash: 0,
-  };
-}
-
-// Arcade drive: throttle -1..1, steer -1..1. Returns true if the car bumped
-// into something solid this step.
-export function driveCar(G, car, dt, throttle, steer) {
-  const MAX_FWD = 540;
-  const MAX_REV = -150;
-  if (throttle > 0) {
-    car.speed += 430 * throttle * dt;
-  } else if (throttle < 0) {
-    if (car.speed > 8) car.speed -= 640 * dt; // brake
-    else car.speed -= 260 * dt; // reverse
-  } else {
-    car.speed -= car.speed * 0.9 * dt; // coast
+  function make(x, y, angle, color, opts) {
+    opts = opts || {};
+    const car = {
+      id: nextId++,
+      x, y, angle,
+      speed: 0,
+      maxSpeed: opts.maxSpeed || 400,
+      accel: opts.accel || 260,
+      color: color || COLORS[Math.floor(Math.random() * COLORS.length)],
+      type: opts.type || 'sedan',
+      ai: opts.ai || null, // null | 'traffic' | 'police'
+      driver: opts.driver || null, // 'player' | 'npc' | null (parked)
+      targetSpeed: 0,
+      steer: 0,
+      hp: 100,
+      marked: !!opts.marked,
+      police: !!opts.police,
+      dead: false,
+    };
+    G.cars.push(car);
+    return car;
   }
-  car.speed -= car.speed * 0.12 * dt; // rolling drag
-  if (car.speed > MAX_FWD) car.speed = MAX_FWD;
-  if (car.speed < MAX_REV) car.speed = MAX_REV;
-  if (Math.abs(car.speed) < 2 && throttle === 0) car.speed = 0;
 
-  const grip = Math.min(1, Math.abs(car.speed) / 180);
-  car.angle += steer * 2.1 * grip * dt * (car.speed < 0 ? -1 : 1);
+  function spawnParked(rng, n) {
+    for (let i = 0; i < n; i++) {
+      const p = City.roadPoint(rng);
+      // park along the road edge
+      const vertical = rng() < 0.5;
+      let x = p.x, y = p.y, angle = 0;
+      if (vertical) { x = p.x + (rng() < 0.5 ? -52 : 52); angle = rng() < 0.5 ? Math.PI / 2 : -Math.PI / 2; }
+      else { y = p.y + (rng() < 0.5 ? -52 : 52); angle = rng() < 0.5 ? 0 : Math.PI; }
+      if (City.hitBuilding(x, y, 26) || City.inWater(x, y)) continue;
+      make(x, y, angle, COLORS[Math.floor(rng() * COLORS.length)], { driver: null });
+    }
+  }
 
-  const dx = Math.cos(car.angle) * car.speed * dt;
-  const dy = Math.sin(car.angle) * car.speed * dt;
-  let bumped = false;
-  if (!solidAt(G.city, car.x + dx, car.y, 20)) {
-    car.x += dx;
-  } else {
-    car.speed *= 0.45;
-    bumped = true;
+  // Drive a car with normalized inputs: throttle -1..1, steer -1..1.
+  function drive(car, throttle, steer, dt) {
+    const maxFwd = car.maxSpeed;
+    const maxRev = car.maxSpeed * 0.45;
+    if (throttle > 0) car.speed += car.accel * throttle * dt;
+    else if (throttle < 0) car.speed += car.accel * 0.9 * throttle * dt;
+    else car.speed -= Math.sign(car.speed) * Math.min(Math.abs(car.speed), 140 * dt);
+    car.speed = clamp(car.speed, -maxRev, maxFwd);
+    const spd = Math.abs(car.speed);
+    const turnRate = 2.4 * clamp(spd / 160, 0, 1) * (car.speed < 0 ? -1 : 1);
+    car.angle += steer * turnRate * dt;
+    const nx = car.x + Math.cos(car.angle) * car.speed * dt;
+    const ny = car.y + Math.sin(car.angle) * car.speed * dt;
+    // building collision: try x then y so the car slides along walls
+    const probe = { x: nx, y: car.y };
+    if (!City.hitBuilding(probe.x, probe.y, 22) && !City.inWater(probe.x, probe.y)) car.x = nx;
+    else car.speed *= 0.4;
+    probe.x = car.x; probe.y = ny;
+    if (!City.hitBuilding(probe.x, probe.y, 22) && !City.inWater(probe.x, probe.y)) car.y = ny;
+    else car.speed *= 0.4;
+    car.x = clamp(car.x, 24, G.W - 24);
+    car.y = clamp(car.y, 24, G.H - 24);
   }
-  if (!solidAt(G.city, car.x, car.y + dy, 20)) {
-    car.y += dy;
-  } else {
-    car.speed *= 0.45;
-    bumped = true;
-  }
-  return bumped;
-}
 
-// Top-down car: shadow, body, cabin, windows, wheels and lights.
-// Police cars get a light bar that flashes with time.
-export function drawCar(ctx, car, time) {
-  ctx.save();
-  ctx.translate(car.x, car.y);
-  ctx.rotate(car.angle);
-  ctx.fillStyle = 'rgba(0,0,0,0.22)';
-  rr(ctx, -23, -11, 48, 26, 8);
-  ctx.fill();
-  ctx.fillStyle = car.color;
-  rr(ctx, -24, -13, 48, 26, 8);
-  ctx.fill();
-  // cabin + windows
-  ctx.fillStyle = 'rgba(30,40,55,0.85)';
-  rr(ctx, -8, -10, 18, 20, 4);
-  ctx.fill();
-  ctx.fillStyle = '#9fc4de';
-  ctx.fillRect(7, -9, 3, 18);
-  ctx.fillRect(-11, -9, 3, 18);
-  // wheels
-  ctx.fillStyle = '#1c1e22';
-  ctx.fillRect(-18, -14, 10, 5);
-  ctx.fillRect(-18, 9, 10, 5);
-  ctx.fillRect(10, -14, 10, 5);
-  ctx.fillRect(10, 9, 10, 5);
-  // headlights / taillights
-  ctx.fillStyle = '#ffe9a8';
-  ctx.fillRect(23, -9, 2, 4);
-  ctx.fillRect(23, 5, 2, 4);
-  ctx.fillStyle = '#e33';
-  ctx.fillRect(-25, -9, 2, 4);
-  ctx.fillRect(-25, 5, 2, 4);
-  if (car.kind === 'cop') {
-    // white doors stripe and a flashing light bar
-    ctx.fillStyle = '#f2f2ee';
-    ctx.fillRect(-6, -13, 12, 26);
-    const on = Math.floor(time * 2.4) % 2 === 0;
-    ctx.fillStyle = on ? '#ff2e2e' : '#2e5cff';
-    rr(ctx, -4, -13, 8, 7, 2);
-    ctx.fill();
-    ctx.fillStyle = on ? '#2e5cff' : '#ff2e2e';
-    rr(ctx, -4, 6, 8, 7, 2);
-    ctx.fill();
+  function collideCars(dt) {
+    const cs = G.cars;
+    for (let i = 0; i < cs.length; i++) {
+      for (let j = i + 1; j < cs.length; j++) {
+        const a = cs[i], b = cs[j];
+        const d = dist(a.x, a.y, b.x, b.y);
+        if (d < 46 && d > 0.01) {
+          const push = (46 - d) / 2;
+          const nx = (b.x - a.x) / d, ny = (b.y - a.y) / d;
+          a.x -= nx * push; a.y -= ny * push;
+          b.x += nx * push; b.y += ny * push;
+          const rel = Math.abs(a.speed - b.speed);
+          if (rel > 120) {
+            if (a.driver === 'player' || b.driver === 'player') {
+              G.shake = Math.max(G.shake, 6);
+              Snd.crash();
+              Player.hurt(4);
+            }
+            a.speed *= 0.6; b.speed *= 0.6;
+          }
+        }
+      }
+    }
   }
-  if (car.kind === 'gold') {
-    ctx.fillStyle = 'rgba(255,255,255,0.5)';
-    rr(ctx, -20, -10, 40, 6, 3);
-    ctx.fill();
-  }
-  ctx.restore();
-}
 
-// The palette's gold, used for the mission car.
-export function goldColor() {
-  return PALETTE.gold;
-}
+  function nearest(x, y, r, filter) {
+    let best = null, bd = r;
+    for (const c of G.cars) {
+      if (filter && !filter(c)) continue;
+      const d = dist(x, y, c.x, c.y);
+      if (d < bd) { bd = d; best = c; }
+    }
+    return best;
+  }
+
+  function draw(ctx) {
+    for (const c of G.cars) {
+      A.drawCar(ctx, c.x, c.y, c.angle, c.color, { police: c.police, marked: c.marked });
+    }
+  }
+
+  return { make, spawnParked, drive, collideCars, nearest, draw };
+})();

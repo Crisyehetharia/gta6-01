@@ -1,329 +1,155 @@
-// Teluk Cerah — entry point.
-//
-// Builds the shared game state, runs the loop, reads the keyboard, moves
-// the camera, and wires the systems together. It also owns the two things
-// the other modules do not: the save file (localStorage) and the staging
-// API the screenshots use (?shot=chase|drive|steal|combat, ?seed=N).
-//
-// The game is plain ES modules loaded by game/index.html; nothing here
-// needs the network.
+// Bandar Pelita — game loop, input, camera, save, and screenshot staging.
+const Game = (() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let last = 0;
+  let firstFrame = false;
 
-import { buildCity, mulberry32, WORLD, PLACES } from './city.js';
-import { createAudio, ensureAudio, sfx, updateAudio, setMuted } from './audio.js';
-import { createPlayer, updatePlayer, drawPlayer } from './player.js';
-import { initTraffic, updateTraffic, drawTraffic } from './traffic.js';
-import { updatePolice, drawPolice } from './police.js';
-import { startMission, updateMissions } from './missions.js';
-import { drawCity } from './city.js';
-import { drawHUD } from './hud.js';
-import { makeCar } from './vehicles.js';
-
-const SAVE_KEY = 'telukcerah-save-v1';
-
-function readSave() {
-  try {
-    const raw = localStorage.getItem(SAVE_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch (e) {
-    return null;
+  function bindInput() {
+    window.addEventListener('keydown', (e) => {
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
+      G.keys[e.code] = true;
+      if (e.code === 'KeyP') {
+        if (G.state === 'playing') G.state = 'paused';
+        else if (G.state === 'paused') G.state = 'playing';
+      }
+      if (e.code === 'KeyM') { G.muted = !G.muted; Hud.toast(G.muted ? 'Suara mati' : 'Suara hidup'); }
+      if (e.code === 'Enter' && G.state === 'playing' && !G.mission && G.missionIndex < Missions.list.length) {
+        Missions.start(G.missionIndex);
+      }
+      if (e.code === 'Space' && G.state === 'menu') startGame();
+    });
+    canvas.addEventListener('click', () => {
+      Snd.init();
+      if (G.state === 'menu') startGame();
+      else if (G.state === 'paused') G.state = 'playing';
+      else if (G.state === 'over') reset();
+      else if (G.state === 'win') { G.state = 'playing'; }
+    });
   }
-}
 
-function writeSave(G) {
-  try {
-    localStorage.setItem(SAVE_KEY, JSON.stringify({
-      cash: G.player.cash,
-      health: G.player.health,
-      missionIdx: G.missionIdx,
-      missionStage: G.missionStage,
-      x: G.player.x,
-      y: G.player.y,
-      wanted: G.player.wanted,
-    }));
-    G.hasSave = true;
-  } catch (e) {
-    /* storage unavailable: the game still plays */
+  function startGame() {
+    Snd.init();
+    G.state = 'playing';
+    if (!G.mission && G.missionIndex < Missions.list.length) Missions.start(G.missionIndex);
   }
-}
 
-function buildState(seed) {
-  const rng = mulberry32(seed);
-  const G = {
-    mode: 'menu',
-    overReason: '',
-    time: 0,
-    seed,
-    rng,
-    keys: Object.create(null),
-    pressed: new Set(),
-    cam: { x: 0, y: 0 },
-    vw: 1280,
-    vh: 720,
-    city: null,
-    player: null,
-    cars: [],
-    peds: [],
-    goldCar: null,
-    missionIdx: 0,
-    missionStage: 'pickup',
-    missionTarget: null,
-    objective: 'Tekan Enter untuk main',
-    banner: { title: '', sub: '', t: 0 },
-    // A short-lived message under the banner (a ram, a near miss) that
-    // never replaces the mission banner.
-    toast: { title: '', sub: '', t: 0 },
-    audio: createAudio(),
-    stats: { stolen: 0, knocked: 0 },
-    quietT: 0,
-    prevWanted: 0,
-    spawnT: 0,
-    hasSave: !!readSave(),
-    shot: null,
-  };
-  G.city = buildCity();
-  G.player = createPlayer(700, 760);
-  initTraffic(G);
-  startMission(G, 0);
-  // Arrow closes over this state object, so re-bind it after any reset.
-  G.saveGame = () => writeSave(G);
-  return G;
-}
-
-function resetWorld(G) {
-  const keepSeed = G.seed;
-  const fresh = buildState(keepSeed);
-  // Keep the same object identity so the loop and the test hook keep working.
-  for (const key of Object.keys(fresh)) {
-    if (key === 'audio' || key === 'keys' || key === 'pressed') continue;
-    G[key] = fresh[key];
-  }
-  G.saveGame = () => writeSave(G);
-  G.mode = 'play';
-  G.banner = { title: 'Teluk Cerah', sub: 'Selamat datang, Rani. Dimas menunggumu.', t: 3 };
-}
-
-function restoreMission(G, idx, stage) {
-  startMission(G, idx);
-  if (idx === 0 && stage === 'deliver') {
-    G.missionStage = 'deliver';
-    G.missionTarget = { x: PLACES.dermaga.x, y: PLACES.dermaga.y, r: PLACES.dermaga.r, label: 'Dermaga Teluk' };
-    G.objective = 'Antar paket ke Dermaga Teluk';
-  } else if (idx === 1 && stage === 'deliver') {
-    G.missionStage = 'deliver';
-    G.missionTarget = { x: PLACES.bengkel.x, y: PLACES.bengkel.y, r: PLACES.bengkel.r, label: 'Bengkel Roda' };
-    G.objective = 'Bawa mobil emas ke Bengkel Roda';
-  }
-}
-
-function loadGame(G) {
-  const s = readSave();
-  if (!s) return false;
-  G.player.cash = s.cash || 0;
-  G.player.health = s.health || 100;
-  G.player.x = s.x || 700;
-  G.player.y = s.y || 760;
-  G.player.wanted = 0;
-  restoreMission(G, s.missionIdx || 0, s.missionStage || 'pickup');
-  if (typeof s.wanted === 'number') G.player.wanted = Math.min(3, s.wanted);
-  G.mode = 'play';
-  return true;
-}
-
-// --- Staging --------------------------------------------------------------
-// ?shot= puts the game straight into a scene for screenshots, with a fixed
-// seed so the shot is reproducible. The player never sees the menu.
-
-function putPlayerInCar(G, car) {
-  const p = G.player;
-  p.onFoot = false;
-  p.car = car;
-  car.driven = true;
-  car.speed = 260;
-  p.x = car.x;
-  p.y = car.y;
-  p.angle = car.angle;
-}
-
-function addCopNear(G, x, y, angle) {
-  const cop = makeCar(x, y, angle, '#e8e8e8', 'cop');
-  cop.speed = 320;
-  G.cars.push(cop);
-  return cop;
-}
-
-function stageShot(G, name) {
-  const p = G.player;
-  G.mode = 'play';
-  if (name === 'chase') {
-    const car = G.cars.find((c) => c.kind === 'traffic');
-    car.x = 1500;
-    car.y = 1100;
-    car.axis = 'h';
-    car.dir = 1;
-    car.road = 1100;
-    car.lane = 17;
-    car.angle = 0;
-    putPlayerInCar(G, car);
-    p.wanted = 3;
-    addCopNear(G, 1250, 1100, 0);
-    addCopNear(G, 1180, 1134, 0);
-    addCopNear(G, 1330, 1066, 0);
-    startMission(G, 0);
-    G.banner = { title: 'Misi 1 — Paket Kilat', sub: 'Antar paket ke Dermaga Teluk.', t: 30 };
-    // The staged driver floors it, so the chase is moving, not parked.
-    G.keys['w'] = true;
-  } else if (name === 'drive') {
-    const car = G.cars.find((c) => c.kind === 'traffic');
-    car.x = 1800;
-    car.y = 900;
-    car.axis = 'v';
-    car.dir = 1;
-    car.road = 1800;
-    car.lane = 17;
-    car.angle = Math.PI / 2;
-    putPlayerInCar(G, car);
-    p.wanted = 0;
-    startMission(G, 0);
-    G.banner = { title: 'Misi 1 — Paket Kilat', sub: 'Antar paket ke Dermaga Teluk.', t: 30 };
-    G.keys['w'] = true;
-  } else if (name === 'steal') {
-    p.x = 2660;
-    p.y = 950;
-    p.angle = -Math.PI / 2;
-    p.onFoot = true;
-    p.car = null;
-    p.wanted = 0;
-    startMission(G, 1);
-    G.banner = { title: 'Misi 2 — Tarik Mobil', sub: 'Curi mobil emas di Parkir Mall.', t: 30 };
-  } else if (name === 'combat') {
-    // An open stretch of road, away from place labels, so Rani and the
-    // punch are the focus of the frame.
-    p.x = 1250;
-    p.y = 1150;
-    p.angle = 0;
-    p.onFoot = true;
-    p.car = null;
-    p.wanted = 1;
-    p.punchT = 0.22;
-    for (let i = 0; i < 3; i += 1) {
-      G.peds.push({
-        x: 1300 + i * 46,
-        y: 1130 + (i % 2) * 50,
-        angle: Math.PI,
-        speed: 50,
-        color: ['#c96f4a', '#4a90c9', '#7d5a9e'][i],
-        down: i === 2 ? 4 : 0,
-        wanderT: 3,
-        fleeT: 0,
-      });
-    }
-    startMission(G, 0);
-    G.banner = { title: 'Misi 1 — Paket Kilat', sub: 'Antar paket ke Dermaga Teluk.', t: 30 };
-  }
-  G.cam.x = Math.max(0, Math.min(WORLD.w - G.vw, p.x - G.vw / 2));
-  G.cam.y = Math.max(0, Math.min(WORLD.h - G.vh, p.y - G.vh / 2));
-}
-
-// --- Boot -----------------------------------------------------------------
-
-const params = new URLSearchParams(window.location.search);
-const seedParam = Number.parseInt(params.get('seed') || '', 10);
-const seed = Number.isSafeInteger(seedParam) ? seedParam : (Math.random() * 1e9) | 0;
-const G = buildState(seed);
-const shot = params.get('shot');
-if (shot) {
-  G.shot = shot;
-  stageShot(G, shot);
-}
-
-const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
-
-window.addEventListener('keydown', (e) => {
-  const key = e.key.toLowerCase();
-  if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(key)) e.preventDefault();
-  if (!e.repeat) G.pressed.add(key);
-  G.keys[key] = true;
-  ensureAudio(G.audio);
-  if (key === 'enter' && G.mode === 'menu') {
-    resetWorld(G);
-    sfx(G.audio, 'click');
-  } else if (key === 'l' && G.mode === 'menu') {
-    if (loadGame(G)) sfx(G.audio, 'click');
-  } else if (key === 'p' && (G.mode === 'play' || G.mode === 'paused')) {
-    G.mode = G.mode === 'play' ? 'paused' : 'play';
-    sfx(G.audio, 'click');
-  } else if (key === 'm') {
-    setMuted(G.audio, !G.audio.muted);
-  } else if (key === 'r' && G.mode === 'over') {
-    resetWorld(G);
-    sfx(G.audio, 'click');
-  }
-});
-window.addEventListener('keyup', (e) => {
-  G.keys[e.key.toLowerCase()] = false;
-});
-canvas.addEventListener('pointerdown', () => ensureAudio(G.audio));
-
-// Test hook for scripted playthroughs: window.__tc
-window.__tc = {
-  G,
-  state() {
+  function reset() {
     const p = G.player;
-    return {
-      mode: G.mode,
-      missionIdx: G.missionIdx,
-      missionStage: G.missionStage,
-      cash: p.cash,
-      wanted: p.wanted,
-      health: Math.round(p.health),
-      x: Math.round(p.x),
-      y: Math.round(p.y),
-      onFoot: p.onFoot,
-      inCar: !p.onFoot,
-      cops: G.cars.filter((c) => c.kind === 'cop').length,
-      pedsDown: G.peds.filter((d) => d.down > 0).length,
-      objective: G.objective,
-    };
-  },
-};
-
-let last = performance.now();
-
-function frame(now) {
-  const dt = Math.min(0.05, (now - last) / 1000);
-  last = now;
-  G.time += dt;
-  if (G.banner) G.banner.t = Math.max(0, G.banner.t - dt);
-  if (G.toast) G.toast.t = Math.max(0, G.toast.t - dt);
-
-  if (G.mode === 'play') {
-    updateMissions(G, dt);
-    updatePlayer(G, dt);
-    updateTraffic(G, dt);
-    updatePolice(G, dt);
-    const speed = G.player.onFoot ? 0 : Math.abs(G.player.car ? G.player.car.speed : 0);
-    updateAudio(G.audio, speed, !G.player.onFoot, G.player.wanted, dt);
-    // Camera follows the player, clamped to the city.
-    const tx = Math.max(0, Math.min(WORLD.w - G.vw, G.player.x - G.vw / 2));
-    const ty = Math.max(0, Math.min(WORLD.h - G.vh, G.player.y - G.vh / 2));
-    const k = Math.min(1, dt * 5);
-    G.cam.x += (tx - G.cam.x) * k;
-    G.cam.y += (ty - G.cam.y) * k;
+    p.health = p.maxHealth;
+    p.x = 1400; p.y = 1350; p.angle = -Math.PI / 2;
+    if (p.inCar) { p.inCar.driver = null; p.inCar.ai = null; p.inCar = null; }
+    G.wanted = 0; G.wantDecay = 0;
+    G.cars = G.cars.filter(c => c.ai !== 'police');
+    G.mission = null;
+    G.state = 'playing';
+    Missions.start(G.missionIndex);
   }
 
-  ctx.clearRect(0, 0, G.vw, G.vh);
-  ctx.save();
-  ctx.translate(-Math.round(G.cam.x), -Math.round(G.cam.y));
-  drawCity(ctx, G);
-  drawTraffic(ctx, G);
-  drawPolice(ctx, G);
-  drawPlayer(ctx, G);
-  ctx.restore();
-  drawHUD(ctx, G);
+  function stageShot(name) {
+    const p = G.player;
+    G.state = 'playing';
+    if (name === 'chase') {
+      // police chase: player speeding north on the main road, 3 cops behind
+      const car = Cars.make(1600, 1500, -Math.PI / 2, '#c0392b', { driver: 'player', maxSpeed: 430 });
+      p.inCar = car; p.x = car.x; p.y = car.y; p.angle = car.angle;
+      car.speed = 320;
+      Missions.start(2);
+      G.wanted = 3;
+      const spots = [[1552, 1760], [1648, 1820], [1600, 1920]];
+      for (const [x, y] of spots) {
+        const cop = Cars.make(x, y, -Math.PI / 2, PAL.police, { ai: 'police', driver: 'npc', police: true, maxSpeed: 470, accel: 330 });
+        cop.speed = 380;
+      }
+    } else if (name === 'drive') {
+      const car = Cars.make(1200, 1200, 0, '#2980b9', { driver: 'player', maxSpeed: 420 });
+      p.inCar = car; p.x = car.x; p.y = car.y; p.angle = car.angle;
+      car.speed = 210;
+      // traffic sharing the same road so the shot reads as city driving
+      const t1 = Cars.make(1560, 1172, 0, '#e67e22', { ai: 'traffic', driver: 'npc', maxSpeed: 190, accel: 160 });
+      t1.cruise = 150; t1.turnCd = 3;
+      const t2 = Cars.make(900, 1228, Math.PI, '#2ecc71', { ai: 'traffic', driver: 'npc', maxSpeed: 190, accel: 160 });
+      t2.cruise = 130; t2.turnCd = 3;
+      const t3 = Cars.make(1980, 1228, Math.PI, '#9b59b6', { ai: 'traffic', driver: 'npc', maxSpeed: 190, accel: 160 });
+      t3.cruise = 140; t3.turnCd = 3;
+      Missions.start(0);
+    } else if (name === 'steal') {
+      Missions.start(1);
+      p.x = 1300; p.y = 1150; p.angle = 0;
+      // a couple of onlookers near the marked sedan
+      G.peds.push({ x: 1330, y: 1090, angle: Math.PI, speed: 30, color: '#f1c40f', tx: 1330, ty: 1090, wait: 2, flee: 0, dead: false });
+      G.peds.push({ x: 1180, y: 1230, angle: 0, speed: 30, color: '#2ecc71', tx: 1180, ty: 1230, wait: 2, flee: 0, dead: false });
+    } else if (name === 'combat') {
+      p.x = 1400; p.y = 1200; p.angle = 0;
+      G.peds.push({ x: 1436, y: 1200, angle: Math.PI, speed: 30, color: '#e74c3c', tx: 1436, ty: 1200, wait: 2, flee: 0, dead: false });
+      G.wanted = 1;
+      const cop = Cars.make(2100, 1200, Math.PI, PAL.police, { ai: 'police', driver: 'npc', police: true, maxSpeed: 470, accel: 330 });
+      cop.speed = 120;
+      Missions.start(0);
+      Hud.toast('Pukul pejalan kaki dengan F!');
+    }
+  }
 
-  G.pressed.clear();
-  requestAnimationFrame(frame);
-}
+  function updateCamera() {
+    const p = G.player;
+    G.cam.x = clamp(p.x - 640, 0, G.W - 1280);
+    G.cam.y = clamp(p.y - 360, 0, G.H - 720);
+  }
 
-requestAnimationFrame(frame);
+  function loop(ts) {
+    requestAnimationFrame(loop);
+    const dt = Math.min(0.05, (ts - last) / 1000 || 0.016);
+    last = ts;
+    G.time += dt;
+    if (G.state === 'playing') {
+      Player.update(dt);
+      Traffic.update(dt);
+      Police.update(dt);
+      Missions.update(dt);
+      Cars.collideCars(dt);
+      updateCamera();
+    }
+    draw();
+    if (!firstFrame) { firstFrame = true; window.__ready = true; }
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, 1280, 720);
+    const shx = (Math.random() - 0.5) * G.shake;
+    const shy = (Math.random() - 0.5) * G.shake;
+    G.shake = Math.max(0, G.shake - 0.8);
+    ctx.save();
+    ctx.translate(-G.cam.x + shx, -G.cam.y + shy);
+    City.drawGround(ctx, G.cam);
+    Cars.draw(ctx);
+    Traffic.draw(ctx);
+    Player.draw(ctx);
+    ctx.restore();
+    Hud.drawWaypoint(ctx);
+    Hud.draw(ctx);
+  }
+
+  function init() {
+    const params = new URLSearchParams(location.search);
+    G.shot = params.get('shot');
+    G.seed = parseInt(params.get('seed') || '1', 10);
+    const rng = mulberry32(20261121);
+    G.player = Player.create(1400, 1350);
+    Cars.spawnParked(rng, 14);
+    Traffic.init(rng);
+    bindInput();
+    const save = Player.load();
+    if (save) {
+      G.cash = save.cash || 0;
+      G.missionIndex = clamp(save.missionIndex || 0, 0, 2);
+    }
+    updateCamera();
+    if (G.shot) stageShot(G.shot);
+    requestAnimationFrame(loop);
+  }
+
+  return { init, stageShot, reset, startGame };
+})();
+
+Game.init();
+window.GAME = Game;

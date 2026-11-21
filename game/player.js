@@ -1,183 +1,187 @@
-// Teluk Cerah — Rani, the player.
-//
-// On foot she walks the streets, punches with F, and slips into cars with E.
-// In a car she drives it. Stealing a parked or traffic car is a crime, so
-// it raises the wanted level the first time per car. Health creeps back
-// while the police are not after her.
-
-import { drawPerson } from './assets.js';
-import { solidAt } from './city.js';
-import { driveCar } from './vehicles.js';
-import { sfx } from './audio.js';
-
-export function createPlayer(x, y) {
-  return {
-    x,
-    y,
-    angle: -Math.PI / 2,
-    onFoot: true,
-    car: null,
-    health: 100,
-    cash: 0,
-    wanted: 0,
-    punchT: 0,
-    punchCd: 0,
-    walkPhase: 0,
-    crimeCd: 0,
-  };
-}
-
-function raiseWanted(G, n) {
-  const p = G.player;
-  const before = p.wanted;
-  p.wanted = Math.min(5, p.wanted + n);
-  if (before === 0 && p.wanted > 0) {
-    G.banner = { title: 'POLISI MENGEJARMU', sub: 'Tingkat buronan naik — kabur dari kejaran!', t: 2.5 };
+// Bandar Pelita — the player: Raka, ex-kurir. On foot and behind the wheel.
+const Player = (() => {
+  function create(x, y) {
+    return {
+      x, y, angle: -Math.PI / 2,
+      speed: 0,
+      health: 100,
+      maxHealth: 100,
+      inCar: null,
+      punchCd: 0,
+      hurtCd: 0,
+      walkPhase: 0,
+    };
   }
-}
 
-export function commitCrime(G, n) {
-  const p = G.player;
-  if (p.crimeCd > 0) return;
-  p.crimeCd = 2;
-  raiseWanted(G, n);
-}
+  function update(dt) {
+    const p = G.player;
+    if (!p) return;
+    p.punchCd = Math.max(0, p.punchCd - dt);
+    p.hurtCd = Math.max(0, p.hurtCd - dt);
+    // slow health regen when calm
+    if (G.wanted === 0 && p.health > 0) p.health = Math.min(p.maxHealth, p.health + 2.5 * dt);
 
-function nearestCar(G, maxDist) {
-  let best = null;
-  let bestD = maxDist;
-  for (const car of G.cars) {
-    if (car.kind === 'cop' || car.driven) continue;
-    const d = Math.hypot(car.x - G.player.x, car.y - G.player.y);
-    if (d < bestD) {
-      bestD = d;
-      best = car;
+    if (p.inCar) {
+      const car = p.inCar;
+      let throttle = 0, steer = 0;
+      if (G.keys['KeyW'] || G.keys['ArrowUp']) throttle = 1;
+      if (G.keys['KeyS'] || G.keys['ArrowDown']) throttle = -1;
+      if (G.keys['KeyA'] || G.keys['ArrowLeft']) steer = -1;
+      if (G.keys['KeyD'] || G.keys['ArrowRight']) steer = 1;
+      Cars.drive(car, throttle, steer, dt);
+      p.x = car.x; p.y = car.y; p.angle = car.angle;
+      Snd.engine(Math.abs(car.speed) / car.maxSpeed);
+      if (G.keys['KeyE']) { exitCar(); G.keys['KeyE'] = false; }
+      return;
     }
-  }
-  return best;
-}
-
-export function updatePlayer(G, dt) {
-  const p = G.player;
-  p.punchT = Math.max(0, p.punchT - dt);
-  p.punchCd = Math.max(0, p.punchCd - dt);
-  p.crimeCd = Math.max(0, p.crimeCd - dt);
-  if (p.wanted === 0 && p.health < 100) p.health = Math.min(100, p.health + 2 * dt);
-
-  const k = G.keys;
-  if (p.onFoot) {
-    let mx = 0;
-    let my = 0;
-    if (k['a'] || k['arrowleft']) mx -= 1;
-    if (k['d'] || k['arrowright']) mx += 1;
-    if (k['w'] || k['arrowup']) my -= 1;
-    if (k['s'] || k['arrowdown']) my += 1;
+    Snd.engine(0);
+    // on foot
+    let mx = 0, my = 0;
+    if (G.keys['KeyW'] || G.keys['ArrowUp']) my -= 1;
+    if (G.keys['KeyS'] || G.keys['ArrowDown']) my += 1;
+    if (G.keys['KeyA'] || G.keys['ArrowLeft']) mx -= 1;
+    if (G.keys['KeyD'] || G.keys['ArrowRight']) mx += 1;
     if (mx !== 0 || my !== 0) {
       const len = Math.hypot(mx, my);
-      mx /= len;
-      my /= len;
-      const target = Math.atan2(my, mx);
-      let diff = target - p.angle;
-      while (diff > Math.PI) diff -= Math.PI * 2;
-      while (diff < -Math.PI) diff += Math.PI * 2;
-      p.angle += diff * Math.min(1, dt * 14);
-      const spd = 178;
-      const nx = p.x + mx * spd * dt;
-      const ny = p.y + my * spd * dt;
-      if (!solidAt(G.city, nx, p.y, 12)) p.x = nx;
-      if (!solidAt(G.city, p.x, ny, 12)) p.y = ny;
-      p.walkPhase += dt * 11;
+      mx /= len; my /= len;
+      p.angle = Math.atan2(my, mx);
+      p.walkPhase += dt * 10;
+      const nx = p.x + mx * 230 * dt;
+      const ny = p.y + my * 230 * dt;
+      if (!City.hitBuilding(nx, p.y, 12) && !City.inWater(nx, p.y)) p.x = nx;
+      if (!City.hitBuilding(p.x, ny, 12) && !City.inWater(p.x, ny)) p.y = ny;
+      p.x = clamp(p.x, 20, G.W - 20);
+      p.y = clamp(p.y, 20, G.H - 20);
     }
-    // Punch: a short forward swipe that floors pedestrians.
-    if (G.pressed.has('f') && p.punchCd <= 0) {
-      p.punchT = 0.28;
-      p.punchCd = 0.55;
-      sfx(G.audio, 'punch');
-      let hit = false;
-      for (const ped of G.peds) {
-        if (ped.down > 0) continue;
-        const d = Math.hypot(ped.x - p.x, ped.y - p.y);
-        if (d > 62) continue;
-        const ang = Math.atan2(ped.y - p.y, ped.x - p.x);
-        let diff = ang - p.angle;
-        while (diff > Math.PI) diff -= Math.PI * 2;
-        while (diff < -Math.PI) diff += Math.PI * 2;
-        if (Math.abs(diff) < 1.2) {
-          ped.down = 4;
-          ped.angle = ang;
-          hit = true;
-        }
-      }
-      if (hit) {
-        commitCrime(G, 1);
-        G.stats.knocked += 1;
-      }
-    }
-    // Enter a nearby car (E). Mission pickups are handled by missions.js
-    // before this runs, so E here only ever means "get in the car".
-    if (G.pressed.has('e')) {
-      const car = nearestCar(G, 72);
-      if (car) {
-        p.onFoot = false;
-        p.car = car;
-        car.driven = true;
-        car.speed = 0;
-        if (!car.stolenFlag && (car.kind === 'parked' || car.kind === 'traffic' || car.kind === 'gold')) {
-          car.stolenFlag = true;
-          commitCrime(G, 1);
-          G.stats.stolen += 1;
-          sfx(G.audio, 'steal');
-          G.banner = { title: 'Mobil dicuri!', sub: 'Polisi sudah diberi tahu — hati-hati.', t: 2 };
-        }
-      }
-    }
-    return;
+    if (G.keys['KeyE']) { tryEnterCar(); G.keys['KeyE'] = false; }
+    if (G.keys['KeyF'] && p.punchCd <= 0) { punch(); }
   }
 
-  // Driving the player's car.
-  const car = p.car;
-  let throttle = 0;
-  if (k['w'] || k['arrowup']) throttle += 1;
-  if (k['s'] || k['arrowdown']) throttle -= 1;
-  let steer = 0;
-  if (k['a'] || k['arrowleft']) steer -= 1;
-  if (k['d'] || k['arrowright']) steer += 1;
-  const bumped = driveCar(G, car, dt, throttle, steer);
-  if (bumped && Math.abs(car.speed) > 200) sfx(G.audio, 'crash');
-  p.x = car.x;
-  p.y = car.y;
-  p.angle = car.angle;
-
-  if (G.pressed.has('e')) {
-    // Step out on the car's left side.
-    const side = car.angle - Math.PI / 2;
-    const ox = car.x + Math.cos(side) * 34;
-    const oy = car.y + Math.sin(side) * 34;
-    if (!solidAt(G.city, ox, oy, 12)) {
-      p.x = ox;
-      p.y = oy;
+  function tryEnterCar() {
+    const p = G.player;
+    const car = Cars.nearest(p.x, p.y, 60, c => c.ai !== 'police');
+    if (!car) return;
+    if (car.driver === 'npc') {
+      // stealing a driven car
+      car.driver = 'player';
+      Police.addWanted(1);
+      Hud.toast('Mobil dicuri! Wanted +1');
+      Snd.thud();
+    } else if (car.driver === null) {
+      // parked car — stealing if anyone is watching
+      car.driver = 'player';
+      const witness = G.peds.some(pd => dist(pd.x, pd.y, p.x, p.y) < 260) ||
+        Police.policeCars().some(c => dist(c.x, c.y, p.x, p.y) < 420);
+      if (witness) { Police.addWanted(1); Hud.toast('Ada yang melihat! Wanted +1'); }
+      else Hud.toast('Mobil diambil diam-diam');
     }
-    p.onFoot = true;
-    p.car = null;
-    car.driven = false;
-    car.speed *= 0.3;
+    p.inCar = car;
+    car.ai = null;
+    Snd.blip();
+    Missions.onEnterCar(car);
   }
-}
 
-export function drawPlayer(ctx, G) {
-  const p = G.player;
-  if (!p.onFoot) return;
-  const bob = Math.sin(p.walkPhase) * 1.5;
-  drawPerson(ctx, p.x, p.y + bob, p.angle, '#3f6fb5', false);
-  if (p.punchT > 0) {
-    ctx.save();
-    ctx.translate(p.x, p.y);
-    ctx.rotate(p.angle);
-    ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-    ctx.lineWidth = 4;
-    ctx.beginPath();
-    ctx.arc(0, 0, 42, -0.7, 0.7);
-    ctx.stroke();
-    ctx.restore();
+  function exitCar() {
+    const p = G.player;
+    if (!p.inCar) return;
+    const car = p.inCar;
+    car.driver = null;
+    car.ai = null;
+    car.speed = 0;
+    p.inCar = null;
+    p.x = car.x + Math.cos(car.angle + Math.PI / 2) * 34;
+    p.y = car.y + Math.sin(car.angle + Math.PI / 2) * 34;
+    if (City.hitBuilding(p.x, p.y, 12)) { p.x = car.x - Math.cos(car.angle + Math.PI / 2) * 34; p.y = car.y - Math.sin(car.angle + Math.PI / 2) * 34; }
+    Snd.engine(0);
   }
-}
+
+  function punch() {
+    const p = G.player;
+    p.punchCd = 0.45;
+    Snd.thud();
+    // hit the nearest pedestrian in front
+    let best = null, bd = 52;
+    for (const pd of G.peds) {
+      const d = dist(p.x, p.y, pd.x, pd.y);
+      if (d < bd) { bd = d; best = pd; }
+    }
+    if (best) {
+      best.angle = angTo(p.x, p.y, best.x, best.y);
+      best.flee = 2.2;
+      Traffic.fleeFrom(p.x, p.y, 180);
+      const seen = Police.policeCars().some(c => dist(c.x, c.y, p.x, p.y) < 380);
+      if (seen) { Police.addWanted(1); Hud.toast('Polisi melihat pemukulan! Wanted +1'); }
+      else Hud.toast('Kamu memukul pejalan kaki!');
+    }
+  }
+
+  function hurt(dmg) {
+    const p = G.player;
+    if (!p || p.hurtCd > 0 || p.health <= 0) return;
+    p.health -= dmg;
+    p.hurtCd = 0.35;
+    G.shake = Math.max(G.shake, 5);
+    if (p.health <= 0) {
+      p.health = 0;
+      gameOver('Raka tumbang. Bandar Pelita memang keras.');
+    }
+  }
+
+  function busted() {
+    const p = G.player;
+    if (p.inCar) exitCar();
+    gameOver('Tertangkap polisi! Misi gagal.');
+    Snd.fail();
+  }
+
+  function gameOver(reason) {
+    if (G.state !== 'playing') return;
+    G.state = 'over';
+    G.overReason = reason;
+    Snd.engineStop();
+    Snd.siren(false);
+    Snd.fail();
+    save();
+  }
+
+  function save() {
+    try {
+      localStorage.setItem('bandar-pelita-save', JSON.stringify({
+        cash: G.cash, missionIndex: G.missionIndex,
+        x: G.player ? G.player.x : 1400, y: G.player ? G.player.y : 1200,
+      }));
+    } catch (e) { /* storage unavailable */ }
+  }
+  function load() {
+    try {
+      const raw = localStorage.getItem('bandar-pelita-save');
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch (e) { return null; }
+  }
+
+  function draw(ctx) {
+    const p = G.player;
+    if (!p) return;
+    if (p.inCar) return; // the car is drawn by Cars.draw
+    // draw the player on foot
+    const bob = Math.sin(p.walkPhase) * 2;
+    A.drawPerson(ctx, p.x, p.y + bob * 0.3, p.angle, PAL.player);
+    // punch swing
+    if (p.punchCd > 0.25) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 26, p.angle - 0.6, p.angle + 0.6);
+      ctx.stroke();
+    }
+    // low health pulse
+    if (p.health < 30) {
+      ctx.strokeStyle = 'rgba(255,60,60,' + (0.4 + 0.3 * Math.sin(G.time * 6)) + ')';
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 20, 0, TAU); ctx.stroke();
+    }
+  }
+
+  return { create, update, hurt, busted, gameOver, save, load, draw, exitCar };
+})();

@@ -1,48 +1,21 @@
-[![make.fun · gta6-01](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
-[![rank](https://make.fun/badge/gta6-01/Crisyehetharia/gta6-01/rank.svg)](https://make.fun/bounty/gta6-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
-[![reward](https://make.fun/badge/gta6-01/Crisyehetharia/gta6-01/reward.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
+[![gta6-01](https://make.fun/api/bounties/gta6-01/badge)](https://make.fun/bounty/gta6-01)
+[![crisyehet93](https://make.fun/api/users/crisyehet93/badge)](https://make.fun/u/crisyehet93)
+[![Crisyehetharia/gta6-01](https://make.fun/api/repos/Crisyehetharia/gta6-01/badge)](https://github.com/Crisyehetharia/gta6-01)
 
-# Teluk Cerah — Kota Terbuka
+# Bandar Pelita
 
-**Teluk Cerah** is an original 2D top-down open-world crime game set in a
-bright coastal city. You are Rani, a courier from Teluk Cerah, taking jobs
-from Dimas, a local fixer. Walk the streets, steal and drive cars, dodge
-traffic and pedestrians, and outrun the police as your wanted stars rise.
-
-## Missions
-
-1. **Paket Kilat** — pick up a parcel at Pasar Pagi and deliver it to the
-   Dermaga Teluk pier. Pays $150.
-2. **Tarik Mobil** — steal the gold car from the Parkir Mall lot and bring
-   it to Bengkel Roda. Pays $250.
-3. **Jalan Keluar** — escape a three-star police chase and reach the Rumah
-   Aman safe house. Pays $400.
-
-Finish all three and the city is yours to roam.
+A GTA-style open-world game set in **Bandar Pelita**, a dusk harbour city. You are **Raka**, a former courier who owes a debt to **Bu Sari**, the night-market boss. Drive, steal cars, dodge the police, and finish three story missions: deliver a package to the lighthouse, repo a sedan for the garage, and escape a city-wide raid.
 
 ## Features
 
-- Open city: road grid, beach and bay, a wooden pier, parks and named places
-- Driveable cars, traffic that follows the roads, and pedestrians who flee
-- Wanted stars, police car chases, ramming, and arrests
-- Combat on foot, health, cash, and a live minimap with player, police,
-  waypoint and car markers
-- Start screen, pause, save (localStorage), game-over screen, and
-  synthesized WebAudio sound — engine hum, sirens, and effects
-- All art drawn in code — no external images, no network requests, no
-  Rockstar assets or names
-
-## Controls
-
-| Key | Action |
-| --- | --- |
-| WASD / Arrow keys | Walk / drive |
-| E | Enter or exit a car, pick up and deliver |
-| F | Punch |
-| P | Pause |
-| M | Mute |
-| R | Restart after game over |
-| L | Continue from the last save (on the menu) |
+- Open world: harbour, night market, park, lighthouse pier, garage, safehouse
+- On-foot and driving gameplay — enter/exit any car, steal parked and driven cars
+- Traffic cars and pedestrians with flee behaviour
+- Wanted system (0–5 stars) with police pursuit, ramming, and arrests
+- 3 story missions with objectives, waypoints, timers, and cash rewards
+- Combat (punch), health, HUD, minimap, start/pause/save/game-over screens
+- Synthesized WebAudio sound: engine, sirens, punches, jingles — no audio files
+- All art drawn in code — no external assets, no network requests
 
 ## Run it
 
@@ -50,6 +23,24 @@ Finish all three and the city is yours to roam.
 node serve.ts
 ```
 
-Then open http://localhost:8080.
+Then open http://localhost:8080
 
-Entered on [make.fun](https://make.fun/?ref=kefgqpce)
+## Controls
+
+- **WASD / arrows** — walk and drive
+- **E** — enter / exit a car
+- **F** — punch
+- **Enter** — start the next mission
+- **P** — pause
+- **M** — mute
+
+## Screenshots
+
+1. Police chase with 3 wanted stars
+2. Driving through traffic
+3. Stealing the marked sedan
+4. Street combat
+
+---
+
+Entered on [make.fun](https://make.fun/?ref=kefgqpce) — built by an AI agent for make.fun's "Make GTA 6" bounty.
